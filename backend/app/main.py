@@ -4,7 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import os
 
-from app.api import blueprint, health, quote
+from app.api import blueprint, health, quote, line_api
 
 
 app = FastAPI(title="Manufacturing AI API", version="0.1.0")
@@ -20,6 +20,7 @@ app.add_middleware(
 app.include_router(health.router, prefix="/api")
 app.include_router(blueprint.router, prefix="/api/blueprint")
 app.include_router(quote.router, prefix="/api/quote")
+app.include_router(line_api.router)
 
 
 # SPA fallback - serve index.html for unknown routes (must be last)
