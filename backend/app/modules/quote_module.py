@@ -6,9 +6,15 @@
 - 工时估算
 - 成本计算
 - 报价生成
+- 与 OCR/RAG/LLM 模块集成
+
+依赖：
+- llm_module: 用于 AI 报价分析
+- rag_module: 用于知识库检索
+- ocr_module: 用于图纸 OCR（可选）
 """
 
-from typing import Optional
+from typing import Optional, List
 from dataclasses import dataclass
 
 
@@ -217,3 +223,174 @@ def generate_quote(
         "lead_time_days": result.lead_time_days,
         "notes": "以上为参考报价，实际价格根据图纸复杂度和数量调整。"
     }
+
+
+# ── QuoteEngine Class ────────────────────────────────────
+
+
+class QuoteEngine:
+    """
+    报价引擎 - 整合 OCR/RAG/LLM 的完整报价系统
+    """
+
+    def __init__(
+        self,
+        llm_client=None,
+        rag_pipeline=None,
+        ocr_result=None
+    ):
+        """
+        初始化报价引擎
+
+        Args:
+            llm_client: LLMClient 实例（可选）
+            rag_pipeline: RAGPipeline 实例（可选）
+            ocr_result: OCRResult 实例（可选）
+        """
+        self.llm_client = llm_client
+        self.rag_pipeline = rag_pipeline
+        self.ocr_result = ocr_result
+
+    def set_llm_client(self, llm_client):
+        """设置 LLM 客户端"""
+        self.llm_client = llm_client
+
+    def set_rag_pipeline(self, rag_pipeline):
+        """设置 RAG 管道"""
+        self.rag_pipeline = rag_pipeline
+
+    def set_ocr_result(self, ocr_result):
+        """设置 OCR 结果"""
+        self.ocr_result = ocr_result
+
+    def extract_info_with_llm(self, blueprint_text: str) -> dict:
+        """
+        使用 LLM 从图纸文本中提取报价信息
+
+        Args:
+            blueprint_text: 图纸 OCR 文本或手动输入
+
+        Returns:
+            dict: 提取的信息（材质、工艺、数量等）
+        """
+        if self.llm_client is None:
+            from .llm_module import LLMClient
+            self.llm_client = LLMClient()
+
+        prompt = f"""从以下图纸信息中提取报价所需参数：
+
+{blueprint_text}
+
+请以 JSON 格式输出：
+{{
+    "material": "材质",
+    "quantity": 数量,
+    "process_type": "工艺类型",
+    "tolerance": "公差要求",
+    "surface_treatment": "表面处理",
+    "weight_kg": 重量(kg),
+    "notes": "其他备注"
+}}
+"""
+
+        response = self.llm_client.generate(prompt=prompt)
+
+        # 尝试解析 JSON
+        try:
+            import json
+            # 尝试提取 JSON 部分
+            text = response.content
+            if "```json" in text:
+                text = text.split("```json")[1].split("```")[0]
+            elif "```" in text:
+                text = text.split("```")[1].split("```")[0]
+            return json.loads(text.strip())
+        except (json.JSONDecode_error, AttributeError):
+            # 解析失败，返回原始文本
+            return {
+                "material": "未知",
+                "quantity": 1,
+                "process_type": "cnc_machining",
+                "raw_response": response.content
+            }
+
+    def search_knowledge_base(self, query: str, top_k: int = 3) -> List[dict]:
+        """
+        搜索知识库获取相关工艺信息
+
+        Args:
+            query: 查询文本
+            top_k: 返回结果数量
+
+        Returns:
+            list[dict]: 检索结果
+        """
+        if self.rag_pipeline is None:
+            return []
+
+        results = self.rag_pipeline.search(query, top_k=top_k)
+        return [
+            {
+                "text": r.chunk.text,
+                "score": r.score,
+                "chunk_id": r.chunk.id
+            }
+            for r in results
+        ]
+
+    def generate_ai_quote(self, blueprint_text: str) -> dict:
+        """
+        AI 报价生成（整合 OCR + LLM + RAG）
+
+        Args:
+            blueprint_text: 图纸文本（可以是 OCR 结果或手动输入）
+
+        Returns:
+            dict: 完整报价单
+        """
+        # 1. 使用 LLM 提取信息
+        extracted = self.extract_info_with_llm(blueprint_text)
+
+        # 2. 搜索知识库
+        knowledge_results = self.search_knowledge_base(
+            f"{extracted.get('material', '')} {extracted.get('process_type', '')}"
+        )
+
+        # 3. 生成报价
+        material = extracted.get("material", "SUS304")
+        quantity = extracted.get("quantity", 1)
+        weight = extracted.get("weight_kg", 1.0)
+        tolerance = extracted.get("tolerance", "normal")
+
+        quote = generate_quote(
+            material=material,
+            weight_kg=weight,
+            quantity=quantity,
+            tolerance=tolerance
+        )
+
+        # 4. 添加 AI 提取的信息和知识库结果
+        quote["ai_extracted"] = extracted
+        quote["knowledge_base"] = knowledge_results
+
+        return quote
+
+
+# ── CLI 入口 ────────────────────────────────────────────
+
+if __name__ == "__main__":
+    print("Quote Module - Manufacturing AI")
+    print("=" * 50)
+
+    # 测试基础报价功能
+    result = generate_quote(
+        material="SUS304",
+        weight_kg=2.5,
+        quantity=100
+    )
+    print("\nTest quote result:")
+    print(f"  Material: {result['material']}")
+    print(f"  Process: {result['process_category']}")
+    print(f"  Total hours: {result['total_hours']}")
+    print(f"  Estimated price: ¥{result['estimated_price']:,}")
+    print(f"  Lead time: {result['lead_time_days']} days")
