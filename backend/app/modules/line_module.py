@@ -388,8 +388,14 @@ class ManufacturingLINEBot:
             return f"知识库查询失败：{str(e)}"
 
     async def _handle_general(self, text: str, reply_token: str) -> str:
-        """处理通用消息"""
-        return """您好！我是制造业AI助手，可以帮您：
+        """处理通用消息 → 调 AI 回复"""
+        from app.modules.ai_module import ai_manufacturing
+        try:
+            answer = await ai_manufacturing.chat(text)
+            return answer
+        except Exception as e:
+            print(f"[ERROR] AI chat error: {e}")
+            return """您好！我是制造业AI助手，可以帮您：
 
 📋 查询报价 - "CNC加工报价"
 📦 查询材质 - "SUS304价格"
