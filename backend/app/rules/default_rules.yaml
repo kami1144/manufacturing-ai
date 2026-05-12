@@ -69,3 +69,22 @@ volume_discounts:
     discount: 0.15
   - min_quantity: 1000
     discount: 0.20
+
+# 数量段阶梯报价（优先于折扣）
+# max_quantity: -1 表示无限
+quantity_tiers:
+  - min_quantity: 1
+    max_quantity: 10
+    unit_price: 12000    # 1-9件，单价 ¥12,000
+  - min_quantity: 10
+    max_quantity: 50
+    unit_price: 8500     # 10-49件，单价 ¥8,500
+  - min_quantity: 50
+    max_quantity: 100
+    unit_price: 6500    # 50-99件，单价 ¥6,500
+  - min_quantity: 100
+    max_quantity: 500
+    unit_price: 5000    # 100-499件，单价 ¥5,000
+  - min_quantity: 500
+    max_quantity: -1
+    unit_price: 3800    # 500+件，单价 ¥3,800

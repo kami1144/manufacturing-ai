@@ -17,6 +17,14 @@ from pathlib import Path
 
 
 @dataclass
+class QuantityTier:
+    """数量段配置"""
+    min_quantity: int      # 最小数量（含）
+    max_quantity: int     # 最大数量（不含，-1表示无限）
+    unit_price: int         # 单价（日元）
+
+
+@dataclass
 class PricingRules:
     """规则配置数据类"""
     material_process_map: Dict[str, str]
@@ -29,6 +37,7 @@ class PricingRules:
     lead_times: Dict[str, int]
     profit_margin: float
     volume_discounts: List[Dict[str, float]]
+    quantity_tiers: List[QuantityTier] = None  # 数量段阶梯报价（新增）
 
 
 class RulesEngine:
@@ -48,6 +57,15 @@ class RulesEngine:
         with open(path, 'r', encoding='utf-8') as f:
             data = yaml.safe_load(f)
 
+        # 解析数量段配置
+        tiers = []
+        for tier_data in data.get('quantity_tiers', []):
+            tiers.append(QuantityTier(
+                min_quantity=tier_data['min_quantity'],
+                max_quantity=tier_data.get('max_quantity', -1),
+                unit_price=tier_data['unit_price']
+            ))
+
         rules = PricingRules(
             material_process_map=data.get('material_process_map', {}),
             labor_rates=data.get('labor_rates', {}),
@@ -58,7 +76,8 @@ class RulesEngine:
             tolerance_multipliers=data.get('tolerance_multipliers', {}),
             lead_times=data.get('lead_times', {}),
             profit_margin=data.get('profit_margin', 0.15),
-            volume_discounts=data.get('volume_discounts', [])
+            volume_discounts=data.get('volume_discounts', []),
+            quantity_tiers=tiers if tiers else None
         )
         return cls(rules)
 
@@ -144,6 +163,53 @@ class RulesEngine:
                 discount = rule['discount']
         return base_price * (1.0 - discount)
 
+    def calculate_tiered_price(self, quantity: int) -> Dict[str, any]:
+        """按数量段计算阶梯价格
+
+        Args:
+            quantity: 数量
+
+        Returns:
+            dict: 包含 tier_info (当前段信息) 和 total_price
+                - tier_min: 最小数量
+                - tier_max: 最大数量
+                - tier_name: 段名称
+                - unit_price: 单价
+                - total_price: 总价
+        """
+        if not self.rules.quantity_tiers:
+            # 没有配置数量段，返回 None
+            return None
+
+        # 查找匹配的段
+        current_tier = None
+        for tier in sorted(self.rules.quantity_tiers, key=lambda x: x.min_quantity):
+            if tier.max_quantity == -1:  # 无限区间
+                if quantity >= tier.min_quantity:
+                    current_tier = tier
+                    break
+            else:
+                if tier.min_quantity <= quantity < tier.max_quantity:
+                    current_tier = tier
+                    break
+
+        if current_tier is None:
+            return None
+
+        # 判断段名称
+        if current_tier.max_quantity == -1:
+            tier_name = f"{current_tier.min_quantity}+"
+        else:
+            tier_name = f"{current_tier.min_quantity}-{current_tier.max_quantity - 1}"
+
+        return {
+            'tier_min': current_tier.min_quantity,
+            'tier_max': current_tier.max_quantity,
+            'tier_name': tier_name,
+            'unit_price': current_tier.unit_price,
+            'total_price': current_tier.unit_price * quantity
+        }
+
     def generate_quote(
         self,
         material: str,
@@ -175,8 +241,17 @@ class RulesEngine:
         # 5. 应用折扣
         final_price = self.apply_discount(quantity, costs['total'])
 
-        # 6. 计算单价
-        unit_price = final_price / quantity if quantity > 0 else final_price
+        # 5.1 尝试使用数量段阶梯价格（优先于折扣）
+        tier_result = self.calculate_tiered_price(quantity)
+        if tier_result:
+            # 如果配置了数量段，使用阶梯价格
+            unit_price = tier_result['unit_price']
+            final_price = tier_result['total_price']
+            pricing_type = 'tiered'
+        else:
+            # 6. 计算单价
+            unit_price = final_price / quantity if quantity > 0 else final_price
+            pricing_type = 'discounted'
 
         # 7. 交期
         lead_time = self.rules.lead_times.get(process_type, 7)
@@ -196,6 +271,7 @@ class RulesEngine:
             'tolerance_cost': costs['tolerance_cost'],
             'subtotal': costs['subtotal'],
             'profit': costs['profit'],
+            'pricing_type': pricing_type,  # 'tiered' 或 'discounted'
             'discount_rate': self._get_discount(quantity),  # 折扣率 0.1 = 10%
             'unit_price': unit_price,
             'total_price': final_price
@@ -271,6 +347,14 @@ def get_default_rules() -> PricingRules:
             {'min_quantity': 100, 'discount': 0.10},
             {'min_quantity': 500, 'discount': 0.15},
             {'min_quantity': 1000, 'discount': 0.20}
+        ],
+        quantity_tiers=[
+            # 默认数量段阶梯报价（样例）
+            QuantityTier(min_quantity=1, max_quantity=10, unit_price=12000),      # 1-9件
+            QuantityTier(min_quantity=10, max_quantity=50, unit_price=8500),      # 10-49件
+            QuantityTier(min_quantity=50, max_quantity=100, unit_price=6500),    # 50-99件
+            QuantityTier(min_quantity=100, max_quantity=500, unit_price=5000),   # 100-499件
+            QuantityTier(min_quantity=500, max_quantity=-1, unit_price=3800),  # 500+件
         ]
     )
 
