@@ -7,6 +7,7 @@ LINE API - FastAPI 路由
 - 多工厂支持
 """
 
+import os
 from fastapi import APIRouter, Request, HTTPException
 from typing import Optional
 
