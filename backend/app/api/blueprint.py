@@ -5,6 +5,10 @@ import uuid
 
 router = APIRouter()
 
+@router.get("/health")
+async def health_check():
+    return {"status": "ok", "service": "blueprint"}
+
 class QueryRequest(BaseModel):
     question: str
     session_id: Optional[str] = None
