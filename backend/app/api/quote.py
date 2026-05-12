@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from typing import Optional, List
 import uuid
 
-from backend.app.modules.rules_engine import get_rules_engine
+from app.modules.rules_engine import get_rules_engine
 
 router = APIRouter()
 
