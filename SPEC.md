@@ -86,14 +86,18 @@ backend/app/modules/
 
 ## 开发阶段
 
-### Phase 1: Demo（当前）
-- [ ] 蓝图问答后端API
-- [ ] 蓝图问答前端页面
-- [ ] 本地模型集成（Qwen2.5-VL + DeepSeek-R1）
+### Phase 1: Demo ✅
+- [x] 蓝图问答后端API
+- [x] 蓝图问答前端页面
+- [x] 本地模型集成（Qwen2.5-VL + DeepSeek-R1）
 
-### Phase 2: 扩展
-- [ ] AI报价系统
-- [ ] 工厂知识库
+### Phase 2: AI报价系统 + 工厂知识库模块化（进行中）
+- [ ] AI报价后端API
+- [ ] AI报价前端页面
+- [ ] 工厂知识库模块化（OCR/RAG/报价 独立模块）
+- [ ] 报价规则引擎
+
+### Phase 3: 扩展
 - [ ] LINE集成
 
 ---
