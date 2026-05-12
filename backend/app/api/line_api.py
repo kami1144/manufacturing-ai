@@ -8,13 +8,22 @@ LINE API - FastAPI 路由
 """
 
 import os
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException, Response
 from typing import Optional
 
 from app.modules.line_module import line_bot, LINEWebhookHandler
 from app.line_config import line_config
 
 router = APIRouter(prefix="/line", tags=["line"])
+
+
+@router.get("/webhook")
+async def line_webhook_verify(request: Request):
+    """LINE Webhook 验证（LINE 平台用 GET 请求验证）"""
+    challenge = request.query_params.get("challenge", "")
+    if challenge:
+        return Response(content=challenge, media_type="text/plain")
+    return {"status": "ok"}
 
 
 @router.post("/webhook")
