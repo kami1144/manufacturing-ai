@@ -14,6 +14,9 @@ import asyncio
 import json
 import httpx
 from typing import Optional
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # 制造业 System Prompt
 MANUFACTURING_SYSTEM_PROMPT = """你是制造业报价助手，熟悉以下领域：
@@ -76,6 +79,9 @@ class AIManufacturing:
                 )
                 response.raise_for_status()
                 data = response.json()
+                base = data.get("base_resp", {})
+                if base.get("status_code") and base.get("status_code") != 0:
+                    return f"⚠️ AI 服务错误：{base.get('status_msg', 'Unknown error')}"
                 return data["choices"][0]["message"]["content"]
         except httpx.TimeoutException:
             return "⏳ AI 响应超时，请稍后再试。"
