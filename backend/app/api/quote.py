@@ -140,8 +140,8 @@ async def calculate_quote(req: Optional[dict] = None):
 
     实际流程：
     1. 提取图纸信息（材质/尺寸/工艺）
-    2. 调用 rules_engine 计算阶梯价格
-    3. 生成报价单
+    2. 调用 rules_engine 计算（阶梯价格优先）
+    3. 生成报价单，确保成本与价格数据一致
     """
     # 从请求中获取参数
     filename = req.get("filename", "blueprint.pdf") if req else "blueprint.pdf"
@@ -151,58 +151,84 @@ async def calculate_quote(req: Optional[dict] = None):
     surface_treatment = req.get("surface_treatment", "none") if req else "none"
     tolerance = req.get("tolerance", "normal") if req else "normal"
 
-    # 调用 rules_engine 计算阶梯价格
+    # 调用 rules_engine 获取完整计算结果
     engine = get_rules_engine()
     tier_result = engine.calculate_tiered_price(quantity)
 
-    if tier_result:
-        # 使用阶梯价格
+    # 先调用 generate_quote 获取必要信息
+    quote = engine.generate_quote(
+        material=material,
+        weight_kg=weight_kg,
+        quantity=quantity,
+        surface_treatment=surface_treatment,
+        tolerance=tolerance
+    )
+
+    # 判断定价类型
+    if tier_result and quote.get('pricing_type') == 'tiered':
+        # 使用阶梯价格体系 - 成本按阶梯价比例缩放
         unit_price = tier_result['unit_price']
         total_price = tier_result['total_price']
-        tier_info = tier_result['tier_name']
         pricing_type = 'tiered'
+        tier_info = tier_result['tier_name']
+
+        # 阶梯价格的成本结构：假设材料占5%，人工占95%（符合钣金加工）
+        # 这样 1件:¥12,000 → ¥600材料 + ¥11,400人工
+        # 100件:¥5,000/件 → ¥250材料 + ¥4,750人工
+        total_material_cost = int(total_price * 0.05)  # 材料5%用于原材料采购
+        total_labor_cost = int(total_price * 0.95)  # 人工95%用于工时费用
     else:
-        # 使用默认规则计算
-        quote = engine.generate_quote(
-            material=material,
-            weight_kg=weight_kg,
-            quantity=quantity,
-            surface_treatment=surface_treatment,
-            tolerance=tolerance
-        )
+        # 使用规则引擎计算的成本（按数量缩放）
         unit_price = quote['unit_price']
         total_price = quote['total_price']
-        tier_info = 'standard'
         pricing_type = quote['pricing_type']
+        tier_info = 'standard'
+        total_material_cost = quote['material_cost'] * quantity
+        total_labor_cost = quote['labor_cost'] * quantity
 
-    # 构建工序明细
+    unit_hours = quote['total_hours']
+    total_hours = unit_hours * quantity  # 总工时按数量累加
+
+    # 构建工序明细 - 按比例分配总成本
+    # 基础比例（基于规则引擎的 base_hours）
+    base_hours = {
+        'cutting': 0.5,
+        'cnc_rough': 2.0,
+        'cnc_finish': 3.0,
+        'deburr': 0.5,
+        'qc': 0.5
+    }
+    total_base_hours = sum(base_hours.values())  # 6.5
+
+    # 材料费全部分配到第一道工序（原材料切割）
+    # 人工费按工时比例分配
     process_steps = [
         ProcessStep(
-            step="原材料切割", process_type="cutting", estimated_hours=0.5,
-            material_cost=2500, labor_cost=4000
+            step="原材料切割", process_type="cutting", estimated_hours=base_hours['cutting'],
+            material_cost=total_material_cost,  # 材料费全在切割工序
+            labor_cost=int(total_labor_cost * base_hours['cutting'] / total_base_hours)
         ),
         ProcessStep(
-            step="CNC粗加工", process_type="cnc_rough", estimated_hours=2.0,
-            material_cost=0, labor_cost=16000
+            step="CNC粗加工", process_type="cnc_rough", estimated_hours=base_hours['cnc_rough'],
+            material_cost=0,
+            labor_cost=int(total_labor_cost * base_hours['cnc_rough'] / total_base_hours)
         ),
         ProcessStep(
-            step="CNC精加工", process_type="cnc_finish", estimated_hours=3.0,
-            material_cost=0, labor_cost=24000
+            step="CNC精加工", process_type="cnc_finish", estimated_hours=base_hours['cnc_finish'],
+            material_cost=0,
+            labor_cost=int(total_labor_cost * base_hours['cnc_finish'] / total_base_hours)
         ),
         ProcessStep(
-            step="去毛刺", process_type="deburr", estimated_hours=0.5,
-            material_cost=0, labor_cost=4000
+            step="去毛刺", process_type="deburr", estimated_hours=base_hours['deburr'],
+            material_cost=0,
+            labor_cost=int(total_labor_cost * base_hours['deburr'] / total_base_hours)
         ),
         ProcessStep(
-            step="质量检测", process_type="qc", estimated_hours=0.5,
-            material_cost=0, labor_cost=4000
+            step="质量检测", process_type="qc", estimated_hours=base_hours['qc'],
+            material_cost=0,
+            labor_cost=int(total_labor_cost * base_hours['qc'] / total_base_hours)
         ),
     ]
-
-    # 计算总成本
-    total_material_cost = 2500
-    total_labor_cost = 52000
-    total_hours = 6.5
 
     return QuoteResponse(
         quote_id=str(uuid.uuid4()),
