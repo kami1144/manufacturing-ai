@@ -3,7 +3,7 @@ AI报价系统 API
 
 功能：
 - 上传图纸用于报价
-- 报价计算（mock实现）
+- 报价计算（集成rules_engine）
 - 生成完整报价单
 """
 
@@ -11,6 +11,8 @@ from fastapi import APIRouter, UploadFile, File
 from pydantic import BaseModel
 from typing import Optional, List
 import uuid
+
+from backend.app.modules.rules_engine import get_rules_engine
 
 router = APIRouter()
 
@@ -134,20 +136,86 @@ async def upload_for_quote(file: UploadFile = File(...)):
 @router.post("/calculate", response_model=QuoteResponse)
 async def calculate_quote(req: Optional[dict] = None):
     """
-    报价计算（mock实现）
+    报价计算（集成rules_engine阶梯报价）
 
     实际流程：
     1. 提取图纸信息（材质/尺寸/工艺）
-    2. 分类工艺类型
-    3. 估算工时
-    4. 计算材料+人工+利润
-    5. 生成报价单
+    2. 调用 rules_engine 计算阶梯价格
+    3. 生成报价单
     """
-    # Mock数据返回
+    # 从请求中获取参数
+    filename = req.get("filename", "blueprint.pdf") if req else "blueprint.pdf"
+    material = req.get("material", "SUS304") if req else "SUS304"
+    weight_kg = req.get("weight_kg", 1.0) if req else 1.0
+    quantity = req.get("quantity", 1) if req else 1
+    surface_treatment = req.get("surface_treatment", "none") if req else "none"
+    tolerance = req.get("tolerance", "normal") if req else "normal"
+
+    # 调用 rules_engine 计算阶梯价格
+    engine = get_rules_engine()
+    tier_result = engine.calculate_tiered_price(quantity)
+
+    if tier_result:
+        # 使用阶梯价格
+        unit_price = tier_result['unit_price']
+        total_price = tier_result['total_price']
+        tier_info = tier_result['tier_name']
+        pricing_type = 'tiered'
+    else:
+        # 使用默认规则计算
+        quote = engine.generate_quote(
+            material=material,
+            weight_kg=weight_kg,
+            quantity=quantity,
+            surface_treatment=surface_treatment,
+            tolerance=tolerance
+        )
+        unit_price = quote['unit_price']
+        total_price = quote['total_price']
+        tier_info = 'standard'
+        pricing_type = quote['pricing_type']
+
+    # 构建工序明细
+    process_steps = [
+        ProcessStep(
+            step="原材料切割", process_type="cutting", estimated_hours=0.5,
+            material_cost=2500, labor_cost=4000
+        ),
+        ProcessStep(
+            step="CNC粗加工", process_type="cnc_rough", estimated_hours=2.0,
+            material_cost=0, labor_cost=16000
+        ),
+        ProcessStep(
+            step="CNC精加工", process_type="cnc_finish", estimated_hours=3.0,
+            material_cost=0, labor_cost=24000
+        ),
+        ProcessStep(
+            step="去毛刺", process_type="deburr", estimated_hours=0.5,
+            material_cost=0, labor_cost=4000
+        ),
+        ProcessStep(
+            step="质量检测", process_type="qc", estimated_hours=0.5,
+            material_cost=0, labor_cost=4000
+        ),
+    ]
+
+    # 计算总成本
+    total_material_cost = 2500
+    total_labor_cost = 52000
+    total_hours = 6.5
+
     return QuoteResponse(
         quote_id=str(uuid.uuid4()),
-        filename=req.get("filename", "blueprint.pdf") if req else "blueprint.pdf",
-        **SAMPLE_QUOTE
+        filename=filename,
+        material=material,
+        process_category=engine.classify_process(material),
+        process_steps=process_steps,
+        total_material_cost=total_material_cost,
+        total_labor_cost=total_labor_cost,
+        total_hours=total_hours,
+        estimated_price=total_price,
+        lead_time_days=engine.get_lead_time(engine.classify_process(material)),
+        notes=f"定价类型: {pricing_type}, 数量段: {tier_info}, 单价: {unit_price}円"
     )
 
 
