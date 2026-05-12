@@ -57,7 +57,9 @@ class RulesEngine:
         with open(path, 'r', encoding='utf-8') as f:
             data = yaml.safe_load(f)
 
-        # 解析数量段配置
+        # 处理空文件或无效YAML（返回None的情况）
+        if data is None:
+            return cls(get_default_rules())
         tiers = []
         for tier_data in data.get('quantity_tiers', []):
             tiers.append(QuantityTier(
