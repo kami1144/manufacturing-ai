@@ -147,7 +147,7 @@ class ManufacturingLINEBot:
 
     def __init__(self):
         self.webhook_handler = LINEWebhookHandler()
-        self._base_url = "http://localhost:8000"
+        self._base_url = os.getenv("API_BASE_URL", "http://localhost:8000")
 
     async def download_line_image(self, message_id: str) -> bytes:
         """从 LINE 服务器下载图片
