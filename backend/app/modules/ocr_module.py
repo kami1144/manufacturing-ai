@@ -99,8 +99,7 @@ def ocr_image(
 
     ocr = PaddleOCR(
         lang=language,
-        use_angle_cls=True,
-        show_log=False
+        use_angle_cls=True
     )
 
     # 处理 CAD 模式
@@ -110,34 +109,47 @@ def ocr_image(
 
     # 确定输入
     if image_path:
-        result = ocr.ocr(image_path, cls=True)
+        result = ocr.ocr(image_path)
     elif processed_bytes:
         with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
             f.write(processed_bytes)
             temp_path = f.name
         try:
-            result = ocr.ocr(temp_path, cls=True)
+            result = ocr.ocr(temp_path)
         finally:
             os.unlink(temp_path)
     else:
         raise ValueError("Either image_path or image_bytes must be provided")
 
     # 解析结果
-    if not result or not result[0]:
+    if not result:
         return OCRResult(text="", confidence=0.0, language=language)
 
-    full_text = []
-    total_conf = 0.0
-    count = 0
+    # PaddleOCR v5 返回格式: [OCRResult字典, ...]
+    # OCRResult 包含 keys: rec_texts, rec_scores, dt_polys 等
+    ocr_result = result[0]
 
-    for line in result[0]:
-        if line:
-            _, (text, conf) = line
-            full_text.append(text)
-            total_conf += conf
-            count += 1
-
-    avg_conf = total_conf / count if count > 0 else 0.0
+    # 兼容处理：可能是旧格式 list 或新格式 dict
+    if isinstance(ocr_result, list):
+        # 旧格式: [[bbox, (text, confidence)], ...]
+        full_text = []
+        total_conf = 0.0
+        count = 0
+        for line in ocr_result:
+            if line:
+                _, (text, conf) = line
+                full_text.append(text)
+                total_conf += conf
+                count += 1
+        avg_conf = total_conf / count if count > 0 else 0.0
+    elif isinstance(ocr_result, dict):
+        # 新格式 v5: {rec_texts: [...], rec_scores: [...]}
+        rec_texts = ocr_result.get("rec_texts", [])
+        rec_scores = ocr_result.get("rec_scores", [])
+        full_text = rec_texts
+        avg_conf = sum(rec_scores) / len(rec_scores) if rec_scores else 0.0
+    else:
+        return OCRResult(text="", confidence=0.0, language=language)
 
     return OCRResult(
         text="\n".join(full_text),
