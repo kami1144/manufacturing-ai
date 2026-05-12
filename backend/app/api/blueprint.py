@@ -7,6 +7,9 @@ import logging
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+# 内存会话存储（生产环境换Redis）
+_sessions: dict[str, list[dict]] = {}
+
 @router.get("/health")
 async def health_check():
     return {"status": "ok", "service": "blueprint"}
@@ -78,26 +81,39 @@ async def query_blueprint(req: QueryRequest):
     session_id = req.session_id or str(uuid.uuid4())
     question = req.question.lower()
 
-    if any(k in question for k in ["material", "material", "zhi cai"]):
+    # 关键词规则匹配（制造业垂直问题）
+    if any(k in question for k in ["material", "zhi cai", "材质", "材料"]):
         answer = f"Material: {BLUEPRINT_SAMPLE['material']}"
-    elif any(k in question for k in ["process", "gong yi"]):
+    elif any(k in question for k in ["process", "gong yi", "工艺", "工序"]):
         answer = f"Process: {BLUEPRINT_SAMPLE['process']}"
-    elif any(k in question for k in ["dimension", "chi cun"]):
+    elif any(k in question for k in ["dimension", "chi cun", "尺寸", "大小"]):
         answer = f"Dimensions: {BLUEPRINT_SAMPLE['dimensions']}"
-    elif any(k in question for k in ["bom", "parts"]):
+    elif any(k in question for k in ["bom", "parts", "物料", "零件"]):
         answer = "BOM:\n" + "\n".join(BLUEPRINT_SAMPLE['bom'])
-    elif any(k in question for k in ["sop", "process steps"]):
+    elif any(k in question for k in ["sop", "process steps", "作业步骤"]):
         answer = "SOP:\n" + BLUEPRINT_SAMPLE['sop']
-    elif any(k in question for k in ["anomaly", "yi chang"]):
+    elif any(k in question for k in ["anomaly", "yi chang", "异常"]):
         answer = "Anomaly Records:\n" + BLUEPRINT_SAMPLE['anomaly']
-    elif any(k in question for k in ["maintenance", "wei xiu"]):
+    elif any(k in question for k in ["maintenance", "wei xiu", "维护"]):
         answer = "Maintenance Records:\n" + BLUEPRINT_SAMPLE['maintenance']
     else:
-        answer = f"Based on blueprints:\n- Material: {BLUEPRINT_SAMPLE['material']}\n- Process: {BLUEPRINT_SAMPLE['process']}\n- Dimensions: {BLUEPRINT_SAMPLE['dimensions']}"
+        # 非规则问题 → 调 AI
+        from app.modules.ai_module import ai_manufacturing
+        history = _sessions.get(session_id, [])
+        answer = await ai_manufacturing.chat(req.question, history)
+
+    # 更新会话历史
+    if session_id not in _sessions:
+        _sessions[session_id] = []
+    _sessions[session_id].append({"role": "user", "content": req.question})
+    _sessions[session_id].append({"role": "assistant", "content": answer})
+    # 最多保留20条
+    if len(_sessions[session_id]) > 20:
+        _sessions[session_id] = _sessions[session_id][-20:]
 
     return {
         "answer": answer,
-        "sources": ["blueprint_data", "rag_knowledge_base"],
+        "sources": ["blueprint_data", "ai_model"],
         "session_id": session_id
     }
 
