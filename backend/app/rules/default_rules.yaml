@@ -1,0 +1,71 @@
+# 报价规则配置文件
+# 用于驱动的可配置参数
+
+# 材料 → 工艺分类映射
+material_process_map:
+  SUS304: cnc_machining
+  SUS316: cnc_machining
+  SECC: sheet_metal
+  SPCC: sheet_metal
+  SGCC: sheet_metal
+  ADC12: die_casting
+  A383: die_casting
+
+# 工时费率（每小时日元）
+labor_rates:
+  cnc_machining: 8000
+  sheet_metal: 6000
+  die_casting: 10000
+  surface_treatment: 3000
+
+# 材料成本费率（每kg日元）
+material_rates:
+  cnc_machining: 2500
+  sheet_metal: 2000
+  die_casting: 3000
+
+# 工时系数（每kg基础工时）
+hour_coefficients:
+  cnc_machining: 0.05
+  sheet_metal: 0.02
+  die_casting: 0.08
+
+# 工艺基础工时（小时）
+base_hours:
+  cutting: 0.5
+  cnc_rough: 2.0
+  cnc_finish: 3.0
+  deburr: 0.5
+  qc: 0.5
+
+# 表面处理加价表
+surface_treatment_surcharge:
+  "研磨": 2000
+  "镀镍": 5000
+  "阳极氧化": 8000
+  "喷漆": 3000
+  "none": 0
+
+# 公差等级系数
+tolerance_multipliers:
+  normal: 1.0
+  high: 1.2
+  ultra: 1.5
+
+# 交期（天）
+lead_times:
+  cnc_machining: 7
+  sheet_metal: 5
+  die_casting: 14
+
+# 利润率
+profit_margin: 0.15
+
+# 折扣配置
+volume_discounts:
+  - min_quantity: 100
+    discount: 0.10  # 10% off
+  - min_quantity: 500
+    discount: 0.15
+  - min_quantity: 1000
+    discount: 0.20
