@@ -79,13 +79,16 @@ async def line_webhook(request: Request):
             text = webhook_handler.extract_message_text(event)
             if text:
                 # 处理文本消息
-                response_text = await line_bot.process_message(user_id, text, reply_token)
+                response = await line_bot.process_message(user_id, text, reply_token)
 
-                # 回复用户
-                await line_bot.reply_message(
-                    reply_token,
-                    [{"type": "text", "text": response_text}],
-                )
+                # 统一处理返回值：dict → 直接发，str → 包装成 text 消息
+                if isinstance(response, dict):
+                    await line_bot.reply_message(reply_token, [response])
+                else:
+                    await line_bot.reply_message(
+                        reply_token,
+                        [{"type": "text", "text": str(response)}],
+                    )
 
                 results.append({
                     "type": "message",
@@ -97,18 +100,13 @@ async def line_webhook(request: Request):
         elif message_type == "image":
             message_id = webhook_handler.extract_message_id(event)
             if message_id:
-                # 下载图片
+                # 下载图片 → OCR → 提取材质 → 报价 → Flex Message 回复
                 try:
                     image_data = await line_bot.download_line_image(message_id)
-                    print(f"[DEBUG] Downloaded image, size={len(image_data)} bytes")
 
-                    # 处理图片（调用 OCR）
-                    response_text = "图纸已收到，我们将分析图纸并尽快回复报价信息。"
-
-                    await line_bot.reply_message(
-                        reply_token,
-                        [{"type": "text", "text": response_text}],
-                    )
+                    # process_blueprint_image 返回 LINE 消息 dict（直接发送）
+                    msg = await line_bot.process_blueprint_image(image_data)
+                    await line_bot.reply_message(reply_token, [msg])
 
                     results.append({
                         "type": "message",
@@ -117,7 +115,11 @@ async def line_webhook(request: Request):
                         "handled": True,
                     })
                 except Exception as e:
-                    print(f"[ERROR] Image processing error: {e}")
+                    print(f"[ERROR] Image quote error: {e}")
+                    await line_bot.reply_message(
+                        reply_token,
+                        [{"type": "text", "text": f"⚠️ 图片处理失败，请稍后再试。"}]
+                    )
                     results.append({
                         "type": "message",
                         "message_type": "image",
