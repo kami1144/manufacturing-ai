@@ -496,23 +496,33 @@ class ManufacturingLINEBot:
         }
 
     async def process_blueprint_image(self, image_bytes: bytes) -> dict:
-        """对图纸图片进行OCR → KB匹配 → 报价 → 回复用户
+        """对图纸图片进行结构化分析 → 6步流程输出
+
+        Step 1 OCR/Vision：真实识别材料/孔/尺寸/注释
+        Step 2 Feature Extraction：孔数量/板厚/对称性/结构类型
+        Step 3 Process Classification：铸造/CNC/板金判断
+        Step 4 Similarity Search：KB结果（如无数据则说明）
+        Step 5 Rule Engine：工时估算
+        Step 6 LLM Output：报价/日文文档/风险提示
 
         Args:
             image_bytes: 图片二进制数据
 
         Returns:
-            LINE 消息 dict
+            LINE 消息 dict（6步结构化输出）
         """
         from app.modules.ai_module import ai_manufacturing
-        # 优先用 MiniMax 多模态理解图纸（PaddleOCR 不可用时）
         import base64
+
+        steps_output = []  # 存储各步骤结果
+
+        # ── Step 1: OCR/Vision ─────────────────────────────────────────────
         image_b64 = base64.b64encode(image_bytes).decode()
-        ai_text = await ai_manufacturing.vision(
+        vision_result = await ai_manufacturing.vision(
             image_b64,
-            "请仔细描述这张制造业图纸的内容，包括：材质、尺寸、数量、工艺要求等所有可见信息。如果有日语或英语的技术标注也请标注。"
+            "请仔细描述这张制造业图纸的内容，包括：材质、尺寸、数量、孔数量、公差、表面处理要求、工艺要求等所有可见信息。如果有日语或英语的技术标注也请标注。识别所有可视化的标注。"
         )
-        if not ai_text:
+        if not vision_result:
             return {
                 "type": "text",
                 "text": "⚠️ 图纸识别服务暂时不可用，请稍后再试，或联系客服手动报价。",
@@ -523,31 +533,117 @@ class ManufacturingLINEBot:
                     ]
                 }
             }
-        recognized_text = f"[图纸解析]\n{ai_text}"
-        print(f"[DEBUG] Blueprint vision result: {recognized_text[:300]}")
+
+        step1_text = f"[Step 1] OCR/Vision 识别结果：\n{vision_result}"
+        steps_output.append({"step": 1, "name": "OCR/Vision", "content": vision_result})
+        print(f"[DEBUG] Step 1 - Vision: {vision_result[:200]}...")
 
         # 2. BlueprintParser 解析结构化参数
         parser = BlueprintParser()
+        recognized_text = f"[图纸解析]\n{vision_result}"
         spec = parser.parse(recognized_text)
         print(f"[DEBUG] Parsed spec: material={spec.material}, quantity={spec.quantity}, "
               f"dimensions={spec.dimensions}, weight_kg={spec.weight_kg}, "
               f"tolerance={spec.tolerance}, surface={spec.surface}")
 
-        # 3. KB 匹配 — 用识别出的文字去知识库查（向量语义搜索）
+        # ── Step 2: Feature Extraction ─────────────────────────────────
+        # 从解析结果提取特征：孔数量/板厚/对称性/结构类型
+        features = {
+            "material": spec.material or "未知",
+            "quantity": spec.quantity if spec.quantity > 0 else 1,
+            "dimensions": spec.dimensions or "未知",
+            "weight_kg": spec.weight_kg if spec.weight_kg else 1.0,
+            "tolerance": spec.tolerance or "普通",
+            "surface": spec.surface or "无特殊要求",
+            "thickness": "未知",
+            "hole_count": 0,
+            "symmetry": "未知",
+            "structure_type": "未知",
+        }
+
+        # 尝试从 vision_result 中提取更多特征
+        vision_lower = vision_result.lower()
+        # 提取板厚
+        import re
+        thickness_match = re.search(r"(\d+\.?\d*)\s*mm", vision_result)
+        if thickness_match:
+            features["thickness"] = thickness_match.group(1) + "mm"
+        # 提取孔数量
+        hole_match = re.search(r"孔[：:]?\s*(\d+)|(\d+)\s*个孔", vision_result)
+        if hole_match:
+            features["hole_count"] = int(hole_match.group(1) or hole_match.group(2))
+        # 判断对称性
+        if any(w in vision_lower for w in ["对称", "对称性", "symmetric"]):
+            features["symmetry"] = "对称"
+        # 判断结构类型
+        if any(w in vision_lower for w in ["圆形", "圆板", "circular"]):
+            features["structure_type"] = "圆形零件"
+        elif any(w in vision_lower for w in ["方形", "方形零件", "square"]):
+            features["structure_type"] = "方形零件"
+        else:
+            features["structure_type"] = "不规则形状"
+
+        step2_text = (
+            f"[Step 2] Feature Extraction 特征提取：\n"
+            f"- 材质：{features['material']}\n"
+            f"- 数量：{features['quantity']}件\n"
+            f"- 尺寸：{features['dimensions']}\n"
+            f"- 重量：{features['weight_kg']}kg\n"
+            f"- 板厚：{features['thickness']}\n"
+            f"- 孔数：{features['hole_count']}个\n"
+            f"- 对称性：{features['symmetry']}\n"
+            f"- 结构类型：{features['structure_type']}"
+        )
+        steps_output.append({"step": 2, "name": "Feature Extraction", "content": features})
+        print(f"[DEBUG] Step 2 - Features: {features}")
+
+        # ── Step 3: Process Classification ────────────────────────────
+        # 判断加工工艺类型：铸造/CNC/板金
+        process_type = self._classify_process(features, vision_result)
+        step3_text = f"[Step 3] Process Classification 工艺判断：\n{process_type}"
+        steps_output.append({"step": 3, "name": "Process Classification", "content": process_type})
+        print(f"[DEBUG] Step 3 - Process: {process_type}")
+
+        # ── Step 4: Similarity Search ────────────────────────────────
         kb_results = []
         try:
             from app.modules.kb_module import get_kb
             kb = get_kb()
             kb_results = kb.vector_search(recognized_text, top_k=3)
-            print(f"[DEBUG] KB vector search matched {len(kb_results)} entries")
+            print(f"[DEBUG] Step 4 - KB matched {len(kb_results)} entries")
         except Exception as kb_err:
             print(f"[WARN] KB search failed: {kb_err}")
 
-        # 4. 用解析结果调用报价 API（weight_kg 用解析值）
+        if kb_results:
+            kb_text = f"[Step 4] Similarity Search 知识库匹配：\n找到 {len(kb_results)} 条相似记录：\n"
+            for i, r in enumerate(kb_results[:3], 1):
+                kb_text += f"{i}. {r['title']} (相似度: {r['score']:.2f})\n"
+        else:
+            kb_text = "[Step 4] Similarity Search 知识库匹配：\n⚠️ 未匹配到相关知识库内容（KB为空或相似度不足）"
+
+        steps_output.append({"step": 4, "name": "Similarity Search", "content": kb_results})
+        print(f"[DEBUG] Step 4 - KB: {kb_text[:200]}...")
+
+        # ── Step 5: Rule Engine 工时估算 ─────────────────────────
         material = spec.material or "SUS304"
         quantity = spec.quantity if spec.quantity > 0 else 1
         weight_kg = spec.weight_kg if spec.weight_kg else 1.0
+        process_category = process_type
 
+        # 基于规则的工时估算
+        hours_estimate = self._estimate_hours(
+            material=material,
+            quantity=quantity,
+            weight_kg=weight_kg,
+            process_type=process_category,
+            features=features,
+        )
+        step5_text = f"[Step 5] Rule Engine 工时估算：\n{hours_estimate}"
+        steps_output.append({"step": 5, "name": "Rule Engine", "content": hours_estimate})
+        print(f"[DEBUG] Step 5 - Hours: {hours_estimate}")
+
+        # ── Step 6: LLM Output ────────────────────────────────────
+        # 调用报价 API
         quote_data = None
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
@@ -557,6 +653,7 @@ class ManufacturingLINEBot:
                         "material": material,
                         "quantity": quantity,
                         "weight_kg": weight_kg,
+                        "process_category": process_category,
                     },
                 )
                 if response.status_code == 200:
@@ -564,14 +661,24 @@ class ManufacturingLINEBot:
         except Exception as q_err:
             print(f"[WARN] Quote API failed: {q_err}")
 
-        # 5. 组合回复 — 优先 KB 内容，再附报价
-        return self._build_blueprint_response(
-            recognized_text=recognized_text,
-            kb_results=kb_results,
-            material=material,
-            quantity=quantity,
+        # 构建最终回复
+        step6_content = self._build_step6_output(
             quote_data=quote_data,
-            spec=spec,
+            process_type=process_type,
+            kb_results=kb_results,
+        )
+        steps_output.append({"step": 6, "name": "LLM Output", "content": step6_content})
+        print(f"[DEBUG] Step 6 - Quote ready")
+
+        # ── 组合 6 步输出 ─────────────────────────────────────────
+        return self._build_6step_response(
+            steps_output=steps_output,
+            vision_result=vision_result,
+            features=features,
+            process_type=process_type,
+            kb_text=kb_text,
+            hours_estimate=hours_estimate,
+            quote_data=quote_data,
         )
 
     def _build_blueprint_response(
@@ -637,6 +744,294 @@ class ManufacturingLINEBot:
         return {
             "type": "text",
             "text": f"已收到图纸，识别材质：{material}，数量：{quantity}件。\n尺寸：{safe_get('dimensions')}\n重量：{safe_get('weight_kg')}kg\n\n暂未匹配到相关知识库内容，请联系客服补充资料。"
+        }
+
+    # ── 6步流程辅助方法 ─────────────────────────────────────
+
+    def _classify_process(self, features: dict, vision_result: str) -> str:
+        """Step 3: 判断加工工艺类型（铸造/CNC/板金）
+
+        Args:
+            features: 提取的特征字典
+            vision_result: 原始 vision 结果
+
+        Returns:
+            工艺类型字符串
+        """
+        material = features.get("material", "").upper()
+        structure_type = features.get("structure_type", "")
+        vision_lower = vision_result.lower()
+
+        # 判断逻辑
+        # 1. 铸造判断：铝合金/锌合金、压铸/低压
+        if any(m in material for m in ["ADC", "A383", "锌", "ZAMAK"]):
+            return "压铸铸造"
+        if "铸造" in vision_result or "铸" in vision_lower:
+            return "压铸铸造"
+
+        # 2. 板金判断：薄板材料
+        if any(m in material for m in ["SECC", "SPCC", "AL5052", "铝合金"]) and features.get("thickness", "未知") != "未知":
+            return "钣金加工"
+        if any(w in vision_lower for w in ["折弯", "钣金", "冲孔", "激光切割", "sheet metal"]):
+            return "钣金加工"
+
+        # 3. 默认 CNC
+        return "CNC加工"
+
+    def _estimate_hours(
+        self,
+        material: str,
+        quantity: int,
+        weight_kg: float,
+        process_type: str,
+        features: dict,
+    ) -> str:
+        """Step 5: 基于规则的工时估算
+
+        Args:
+            material: 材质
+            quantity: 数量
+            weight_kg: 重量 kg
+            process_type: 工艺类型
+            features: 特征字典
+
+        Returns:
+            工时估算文本
+        """
+        # 基础工时（单机加工）
+        base_hours = {
+            "CNC加工": 2.0,
+            "钣金加工": 1.5,
+            "压铸铸造": 3.0,
+        }
+
+        # 材质系数（难度）
+        material_factor = {
+            "SUS304": 1.3,
+            "SUS303": 1.2,
+            "AL5052": 1.0,
+            "ADC12": 1.1,
+            "SECC": 1.0,
+            "SPCC": 0.9,
+        }
+
+        # 获取基础工时和材质系数
+        base = base_hours.get(process_type, 2.0)
+        factor = material_factor.get(material.upper(), 1.0)
+
+        # 数量系数（批量优惠）
+        if quantity <= 10:
+            qty_factor = 1.0
+        elif quantity <= 50:
+            qty_factor = 0.85
+        elif quantity <= 100:
+            qty_factor = 0.75
+        else:
+            qty_factor = 0.65
+
+        # 孔数系数（有孔更复杂）
+        hole_count = features.get("hole_count", 0)
+        hole_factor = 1.0 + (hole_count * 0.05) if hole_count > 0 else 1.0
+
+        # 计算总工时
+        estimated_hours = base * factor * qty_factor * hole_factor
+
+        # 格式化输出
+        return (
+            f"预估工时：{estimated_hours:.1f}小时/件\n"
+            f"- 基础工时：{base}小时\n"
+            f"- 材质系数：{factor} ({material})\n"
+            f"- 批量系数：{qty_factor} (x{quantity}件)\n"
+            f"- 孔数系数：{hole_factor} ({hole_count}个孔)"
+        )
+
+    def _build_step6_output(
+        self,
+        quote_data: dict,
+        process_type: str,
+        kb_results: list,
+    ) -> dict:
+        """Step 6: 构建最终报价输出
+
+        Args:
+            quote_data: 报价 API 返回数据
+            process_type: 工艺类型
+            kb_results: KB 匹配结果
+
+        Returns:
+            报价内容字典
+        """
+        if not quote_data:
+            return {
+                "text": "报价生成中，请联系客服确认最终价格。",
+                "has_quote": False,
+            }
+
+        pricing = quote_data.get("pricing", {})
+        return {
+            "unit_price": pricing.get("unit_price", 0),
+            "moq_price": pricing.get("moq_price", 0),
+            "mass_price": pricing.get("mass_production_price", 0),
+            "lead_time_days": quote_data.get("lead_time_days", 0),
+            "process_type": process_type,
+            "has_quote": True,
+        }
+
+    def _build_6step_response(
+        self,
+        steps_output: list,
+        vision_result: str,
+        features: dict,
+        process_type: str,
+        kb_text: str,
+        hours_estimate: str,
+        quote_data: dict,
+    ) -> dict:
+        """组合 6 步结构化输出 → LINE 消息
+
+        Args:
+            steps_output: 各步骤输出列表
+            vision_result: Step 1 原始结果
+            features: Step 2 特征
+            process_type: Step 3 工艺类型
+            kb_text: Step 4 KB 文本
+            hours_estimate: Step 5 工时估算
+            quote_data: Step 6 报价数据
+
+        Returns:
+            LINE 消息 dict
+        """
+        # 构建 6 步完整文字输出
+        lines = [
+            "📋 图纸分析报告（6步结构化）\n",
+            "=" * 30,
+            "",
+            f"[Step 1] OCR/Vision 识别：",
+            vision_result[:300] if len(vision_result) > 300 else vision_result,
+            "",
+            f"[Step 2] Feature Extraction：",
+            f"- 材质: {features.get('material')}",
+            f"- 数量: {features.get('quantity')}件",
+            f"- 尺寸: {features.get('dimensions')}",
+            f"- 重量: {features.get('weight_kg')}kg",
+            f"- 板厚: {features.get('thickness')}",
+            f"- 孔数: {features.get('hole_count')}个",
+            f"- 对称性: {features.get('symmetry')}",
+            f"- 结构类型: {features.get('structure_type')}",
+            "",
+            f"[Step 3] Process Classification：{process_type}",
+            "",
+            kb_text,
+            "",
+            f"[Step 5] Rule Engine 工时：",
+            hours_estimate,
+        ]
+
+        # 添加 Step 6 报价（如有）
+        if quote_data:
+            pricing = quote_data.get("pricing", {})
+            unit_price = pricing.get("unit_price", 0)
+            lines.extend([
+                "",
+                f"[Step 6] LLM Output 报价：",
+                f"💰 参考单价：¥{unit_price:,}/件",
+                f"📅 预计交期：{quote_data.get('lead_time_days', 0)}天",
+            ])
+        else:
+            lines.extend([
+                "",
+                "[Step 6] LLM Output：",
+                "⚠️ 报价生成中，请联系客服确认最终价格。",
+                "📎 风险提示：此��价仅为估算值，实际价格可能因图纸复杂度有所调整。",
+            ])
+
+        full_text = "\n".join(lines)
+
+        # 检查文本长度，超长则用 Flex Message
+        if len(full_text) > 2000:
+            return self._create_6step_flex_message(
+                steps_output=steps_output,
+                features=features,
+                process_type=process_type,
+                quote_data=quote_data,
+            )
+
+        return {
+            "type": "text",
+            "text": full_text,
+            "quickReply": {
+                "items": [
+                    {"type": "action", "action": {"type": "message", "label": "📝 确认报价", "text": "确认报价"}},
+                    {"type": "action", "action": {"type": "message", "label": "🔧 修改参数", "text": "修改参数"}},
+                    {"type": "action", "action": {"type": "message", "label": "📞 联系客服", "text": "人工报价"}},
+                ]
+            }
+        }
+
+    def _create_6step_flex_message(
+        self,
+        steps_output: list,
+        features: dict,
+        process_type: str,
+        quote_data: dict,
+    ) -> dict:
+        """创建 6 步 Flex Message（文本过长时使用）"""
+        # 提取关键信息
+        material = features.get("material", "未知")
+        quantity = features.get("quantity", 0)
+        dimensions = features.get("dimensions", "未知")
+        tolerance = features.get("tolerance", "普通")
+        surface = features.get("surface", "无")
+        weight_kg = features.get("weight_kg", 0)
+
+        # 报价信息
+        pricing_text = "报价生成中"
+        lead_time_text = "待确认"
+        if quote_data:
+            pricing = quote_data.get("pricing", {})
+            pricing_text = f"¥{pricing.get('unit_price', 0):,}/件"
+            lead_time_text = f"{quote_data.get('lead_time_days', 0)}天"
+
+        return {
+            "type": "flex",
+            "altText": "图纸分析报告",
+            "contents": {
+                "type": "carousel",
+                "contents": [
+                    {
+                        "type": "bubble",
+                        "header": {
+                            "type": "box",
+                            "layout": "vertical",
+                            "contents": [
+                                {"type": "text", "text": "📋 图纸分析报告", "weight": "bold", "size": "lg"},
+                                {"type": "text", "text": "6步结构化输出", "size": "sm", "color": "#888888"}
+                            ]
+                        },
+                        "body": {
+                            "type": "box",
+                            "layout": "vertical",
+                            "contents": [
+                                {"type": "text", "text": f"Step 1-2: 材质={material}, 数量={quantity}件", "wrap": True},
+                                {"type": "text", "text": f"尺寸={dimensions}", "wrap": True},
+                                {"type": "text", "text": f"板厚={features.get('thickness')}, 孔数={features.get('hole_count')}", "wrap": True},
+                                {"type": "separator"},
+                                {"type": "text", "text": f"Step 3: {process_type}", "weight": "bold"},
+                                {"type": "text", "text": f"Step 4: KB相似搜索", "wrap": True},
+                                {"type": "text", "text": f"Step 5: 工时估算", "wrap": True},
+                            ]
+                        },
+                        "footer": {
+                            "type": "box",
+                            "layout": "vertical",
+                            "contents": [
+                                {"type": "text", "text": f"💰 {pricing_text}", "weight": "bold", "color": "#FF0000"},
+                                {"type": "text", "text": f"📅 交期: {lead_time_text}"},
+                            ]
+                        }
+                    }
+                ]
+            }
         }
 
     async def _handle_material(self, text: str, reply_token: str) -> str:

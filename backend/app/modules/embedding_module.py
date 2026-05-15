@@ -98,7 +98,17 @@ def _minimax_embed_texts(texts: List[str]) -> np.ndarray:
         )
         resp.raise_for_status()
         data = resp.json()
-        embeddings.append(data["vectors"][0]["embedding"])
+        # MiniMax 实际返回格式: {"vectors": [[...], [...], ...]} 向量数组
+        # 不是 {"vectors": [{"embedding": [...]}, ...]}
+        vectors_list = data.get("vectors", [])
+        if vectors_list and isinstance(vectors_list[0], list):
+            # 直接是向量数组
+            embeddings.append(vectors_list[0])
+        elif vectors_list and isinstance(vectors_list[0], dict):
+            # 兼容旧格式 {"embedding": [...]}
+            embeddings.append(vectors_list[0].get("embedding", []))
+        else:
+            raise ValueError(f"Unexpected vectors format: {type(vectors_list[0])}")
 
     return np.array(embeddings)
 
