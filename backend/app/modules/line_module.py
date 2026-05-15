@@ -737,7 +737,7 @@ class ManufacturingLINEBot:
             return f"知识库查询失败：{str(e)}"
 
     async def _handle_general(self, text: str, reply_token: str) -> str:
-        """处理通用消息 → 纯 KB 向量检索，不用 AI"""
+        """处理通用消息 → KB 向量检索 → 无结果时 fallback AI"""
         try:
             from app.modules.kb_module import get_kb
             kb = get_kb()
@@ -765,18 +765,16 @@ class ManufacturingLINEBot:
 
                 return "\n".join(lines)
             else:
-                return """您好！我是制造业报价助手，可以帮您：
-
-📋 查询报价 - "SUS304报价"
-📦 查询材质 - "材质规格"
-🔧 查询工艺 - "工艺类型"
-📅 查询交期 - "交期多久"
-📚 知识库 - "发送图纸图片自动识别"
-
-请尝试以上方式，或直接发送图纸图片获取报价。"""
+                # KB 无结果 → 走 AI
+                return await self._handle_ai_fallback(text)
         except Exception as e:
             print(f"[ERROR] KB search error: {e}")
             return "⚠️ 知识库查询失败，请稍后再试。"
+
+    async def _handle_ai_fallback(self, text: str) -> str:
+        """KB 无结果时调用 AI（带回答范围约束）"""
+        from app.modules.ai_module import ai_manufacturing
+        return await ai_manufacturing.chat(text)
 
     def _format_quote_reply(self, data: dict) -> str:
         """格式化报价回复"""
