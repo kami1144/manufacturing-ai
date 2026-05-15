@@ -502,6 +502,7 @@ class ManufacturingLINEBot:
             LINE 消息 dict
         """
         from app.modules.ocr_module import ocr_image, check_ocr_available
+        from app.modules.blueprint_parser import BlueprintParser
 
         if not check_ocr_available():
             return {
@@ -510,12 +511,19 @@ class ManufacturingLINEBot:
             }
 
         try:
-            # 1. OCR 识别图纸内容
-            ocr_result = await ocr_image(image_bytes)
-            recognized_text = ocr_result.get("text", "")
+            # 1. OCR 识别图纸内容（同步函数，不用 await）
+            ocr_result = ocr_image(image_bytes=image_bytes, language="en")
+            recognized_text = ocr_result.text
             print(f"[DEBUG] OCR result: {recognized_text[:200]}")
 
-            # 2. KB 匹配 — 用识别出的文字去知识库查（向量语义搜索）
+            # 2. BlueprintParser 解析结构化参数
+            parser = BlueprintParser()
+            spec = parser.parse(recognized_text)
+            print(f"[DEBUG] Parsed spec: material={spec.material}, quantity={spec.quantity}, "
+                  f"dimensions={spec.dimensions}, weight_kg={spec.weight_kg}, "
+                  f"tolerance={spec.tolerance}, surface={spec.surface}")
+
+            # 3. KB 匹配 — 用识别出的文字去知识库查（向量语义搜索）
             kb_results = []
             try:
                 from app.modules.kb_module import get_kb
@@ -525,18 +533,11 @@ class ManufacturingLINEBot:
             except Exception as kb_err:
                 print(f"[WARN] KB search failed: {kb_err}")
 
-            # 3. 提取材质和数量
-            import re
-            material_match = re.search(
-                r"(SUS\d+|SECC|SPCC|ADC\d+|AISI\d+|JIS\s*\w+)",
-                recognized_text.upper()
-            )
-            material = material_match.group(0) if material_match else "SUS304"
+            # 4. 用解析结果调用报价 API（weight_kg 用解析值）
+            material = spec.material or "SUS304"
+            quantity = spec.quantity if spec.quantity > 0 else 1
+            weight_kg = spec.weight_kg if spec.weight_kg else 1.0
 
-            qty_match = re.search(r"(\d+)\s*(?:個|个|件|pcs|pieces)", recognized_text)
-            quantity = int(qty_match.group(1)) if qty_match else 1
-
-            # 4. 调用报价 API
             quote_data = None
             try:
                 async with httpx.AsyncClient(timeout=15.0) as client:
@@ -545,7 +546,7 @@ class ManufacturingLINEBot:
                         json={
                             "material": material,
                             "quantity": quantity,
-                            "weight_kg": 1.0,
+                            "weight_kg": weight_kg,
                         },
                     )
                     if response.status_code == 200:
@@ -560,6 +561,7 @@ class ManufacturingLINEBot:
                 material=material,
                 quantity=quantity,
                 quote_data=quote_data,
+                spec=spec,
             )
 
         except Exception as e:
@@ -576,8 +578,13 @@ class ManufacturingLINEBot:
         material: str,
         quantity: int,
         quote_data: dict,
+        spec=None,
     ) -> dict:
         """组合 KB 匹配结果 + 报价 → LINE Flex Message"""
+        # 安全获取 spec 属性
+        def safe_get(attr, default=""):
+            return getattr(spec, attr, default) or default
+
         # KB 有匹配 → 用 Flex Message 展示完整信息
         if kb_results:
             lines = []
@@ -606,8 +613,12 @@ class ManufacturingLINEBot:
                         "type": "box",
                         "layout": "vertical",
                         "contents": [
-                            {"type": "text", "text": f"识别材质：{material}", "weight": "bold"},
-                            {"type": "text", "text": f"数量：{quantity}件", "weight": "bold"},
+                            {"type": "text", "text": f"材质：{material}", "weight": "bold"},
+                            {"type": "text", "text": f"数量：{quantity}件"},
+                            {"type": "text", "text": f"尺寸：{safe_get('dimensions')}"},
+                            {"type": "text", "text": f"公差：{safe_get('tolerance')}"},
+                            {"type": "text", "text": f"表面：{safe_get('surface')}"},
+                            {"type": "text", "text": f"重量：{safe_get('weight_kg')}kg"},
                             {"type": "separator"},
                             {"type": "text", "text": body_text[:500], "wrap": True},
                         ],
@@ -622,7 +633,7 @@ class ManufacturingLINEBot:
         # 什么都没有 → 文字说明
         return {
             "type": "text",
-            "text": f"已收到图纸，识别材质：{material}，数量：{quantity}件。\n\n暂未匹配到相关知识库内容，请联系客服补充资料。"
+            "text": f"已收到图纸，识别材质：{material}，数量：{quantity}件。\n尺寸：{safe_get('dimensions')}\n重量：{safe_get('weight_kg')}kg\n\n暂未匹配到相关知识库内容，请联系客服补充资料。"
         }
 
     async def _handle_material(self, text: str, reply_token: str) -> str:
