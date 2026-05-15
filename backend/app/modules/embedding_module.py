@@ -78,10 +78,11 @@ def _minimax_embed_texts(texts: List[str]) -> np.ndarray:
         raise ValueError("GroupId not set. Set EMBEDDING_GROUP_ID or use format: API_KEY-GroupId in AI_API_KEY")
 
     embeddings = []
-    url = f"https://api.minimax.chat/v1/text/embeddings?GroupId={MINIMAX_GROUP_ID}"
+    url = "https://api.minimax.chat/v1/embeddings"
     headers = {
         "Authorization": f"Bearer {MINIMAX_API_KEY}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "GroupId": MINIMAX_GROUP_ID
     }
 
     for text in texts:
@@ -89,6 +90,7 @@ def _minimax_embed_texts(texts: List[str]) -> np.ndarray:
             url,
             headers=headers,
             json={
+                "type": "embedding",
                 "model": MINIMAX_EMBEDDING_MODEL,
                 "texts": [text]
             },
@@ -96,7 +98,7 @@ def _minimax_embed_texts(texts: List[str]) -> np.ndarray:
         )
         resp.raise_for_status()
         data = resp.json()
-        embeddings.append(data["data"][0]["embedding"])
+        embeddings.append(data["vectors"][0]["embedding"])
 
     return np.array(embeddings)
 
