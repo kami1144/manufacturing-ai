@@ -117,6 +117,7 @@ class AIManufacturing:
             AI 对图片的描述
         """
         import base64
+        import json
         import subprocess
         import tempfile
         import os
@@ -148,8 +149,15 @@ class AIManufacturing:
                 print(f"[ERROR] mmx vision stderr: {result.stderr}")
                 return ""
 
-            # 将用户 prompt 融入结果
-            description = result.stdout.strip()
+            # 解析 JSON 输出，提取 content 字段
+            try:
+                output = json.loads(result.stdout)
+                description = output.get("content", "")
+                print(f"[DEBUG] mmx content: {description[:200]}...")
+            except json.JSONDecodeError as e:
+                print(f"[ERROR] Failed to parse mmx JSON: {e}")
+                print(f"[DEBUG] mmx stdout: {result.stdout[:500]}")
+                description = result.stdout.strip()
             if prompt and prompt != "请描述这张图片的内容":
                 description = f"{prompt}\n\n{description}"
 
