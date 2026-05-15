@@ -625,50 +625,72 @@ class ManufacturingLINEBot:
         print(f"[DEBUG] Step 4 - KB: {kb_text[:200]}...")
 
         # ── Step 5: Rule Engine 工时估算 ─────────────────────────
-        material = spec.material or "SUS304"
-        quantity = spec.quantity if spec.quantity > 0 else 1
-        weight_kg = spec.weight_kg if spec.weight_kg else 1.0
-        process_category = process_type
+        # 只有 KB 有真实匹配数据时才进行报价
+        has_kb_data = bool(kb_results)
 
-        # 基于规则的工时估算
-        hours_estimate = self._estimate_hours(
-            material=material,
-            quantity=quantity,
-            weight_kg=weight_kg,
-            process_type=process_category,
-            features=features,
-        )
-        step5_text = f"[Step 5] Rule Engine 工时估算：\n{hours_estimate}"
-        steps_output.append({"step": 5, "name": "Rule Engine", "content": hours_estimate})
-        print(f"[DEBUG] Step 5 - Hours: {hours_estimate}")
+        if has_kb_data:
+            # KB 有数据 → 进行工时估算
+            material = spec.material or "SUS304"
+            quantity = spec.quantity if spec.quantity > 0 else 1
+            weight_kg = spec.weight_kg if spec.weight_kg else 1.0
+            process_category = process_type
 
-        # ── Step 6: LLM Output ────────────────────────────────────
-        # 调用报价 API
-        quote_data = None
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                response = await client.post(
-                    f"{self._base_url}/api/quote/generate",
-                    json={
-                        "material": material,
-                        "quantity": quantity,
-                        "weight_kg": weight_kg,
-                        "process_category": process_category,
-                    },
-                )
-                if response.status_code == 200:
-                    quote_data = response.json()
-        except Exception as q_err:
-            print(f"[WARN] Quote API failed: {q_err}")
+            # 基于规则的工时估算
+            hours_estimate = self._estimate_hours(
+                material=material,
+                quantity=quantity,
+                weight_kg=weight_kg,
+                process_type=process_category,
+                features=features,
+            )
+            step5_text = f"[Step 5] Rule Engine 工时估算：\n{hours_estimate}"
+            steps_output.append({"step": 5, "name": "Rule Engine", "content": hours_estimate})
+            print(f"[DEBUG] Step 5 - Hours: {hours_estimate}")
+        else:
+            # KB 为空 → 跳过 Step 5
+            hours_estimate = None
+            step5_text = "[Step 5] Rule Engine 工时估算：\n⚠️ 跳过（KB无匹配数据）"
+            steps_output.append({"step": 5, "name": "Rule Engine", "content": "跳过"})
+            print(f"[DEBUG] Step 5 - Skipped (KB empty)")
 
-        # 构建最终回复
-        step6_content = self._build_step6_output(
-            quote_data=quote_data,
-            process_type=process_type,
-            kb_results=kb_results,
-        )
-        steps_output.append({"step": 6, "name": "LLM Output", "content": step6_content})
-        print(f"[DEBUG] Step 6 - Quote ready")
+        # ── Step 6: LLM Output ───────────────────────────────────
+        # 只有 KB 有真实匹配数据时才调用报价 API
+        if has_kb_data:
+            # 调用报价 API
+            quote_data = None
+            try:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    response = await client.post(
+                        f"{self._base_url}/api/quote/generate",
+                        json={
+                            "material": spec.material or "SUS304",
+                            "quantity": spec.quantity if spec.quantity > 0 else 1,
+                            "weight_kg": spec.weight_kg if spec.weight_kg else 1.0,
+                            "process_category": process_type,
+                        },
+                    )
+                    if response.status_code == 200:
+                        quote_data = response.json()
+            except Exception as q_err:
+                print(f"[WARN] Quote API failed: {q_err}")
+
+            # 构建最终回复
+            step6_content = self._build_step6_output(
+                quote_data=quote_data,
+                process_type=process_type,
+                kb_results=kb_results,
+            )
+            steps_output.append({"step": 6, "name": "LLM Output", "content": step6_content})
+            print(f"[DEBUG] Step 6 - Quote ready")
+        else:
+            # KB 为空 → 跳过 Step 6，提示联系客服
+            step6_content = {
+                "text": "请联系客服获取准确报价",
+                "has_quote": False,
+            }
+            steps_output.append({"step": 6, "name": "LLM Output", "content": step6_content})
+            quote_data = None
+            print(f"[DEBUG] Step 6 - Skipped (KB empty)")
 
         # ── 组合 6 步输出 ─────────────────────────────────────────
         return self._build_6step_response(
@@ -679,6 +701,7 @@ class ManufacturingLINEBot:
             kb_text=kb_text,
             hours_estimate=hours_estimate,
             quote_data=quote_data,
+            has_kb_data=has_kb_data,
         )
 
     def _build_blueprint_response(
@@ -886,6 +909,7 @@ class ManufacturingLINEBot:
         kb_text: str,
         hours_estimate: str,
         quote_data: dict,
+        has_kb_data: bool = True,
     ) -> dict:
         """组合 6 步结构化输出 → LINE 消息
 
@@ -897,6 +921,7 @@ class ManufacturingLINEBot:
             kb_text: Step 4 KB 文本
             hours_estimate: Step 5 工时估算
             quote_data: Step 6 报价数据
+            has_kb_data: KB 是否有真实匹配数据
 
         Returns:
             LINE 消息 dict
@@ -922,27 +947,42 @@ class ManufacturingLINEBot:
             f"[Step 3] Process Classification：{process_type}",
             "",
             kb_text,
-            "",
-            f"[Step 5] Rule Engine 工时：",
-            hours_estimate,
         ]
 
-        # 添加 Step 6 报价（如有）
-        if quote_data:
-            pricing = quote_data.get("pricing", {})
-            unit_price = pricing.get("unit_price", 0)
+        # KB 有数据时才输出 Step 5 和 Step 6
+        if has_kb_data and hours_estimate:
             lines.extend([
                 "",
-                f"[Step 6] LLM Output 报价：",
-                f"💰 参考单价：¥{unit_price:,}/件",
-                f"📅 预计交期：{quote_data.get('lead_time_days', 0)}天",
+                f"[Step 5] Rule Engine 工时：",
+                hours_estimate,
             ])
+
+            # 添加 Step 6 报价（如有）
+            if quote_data:
+                pricing = quote_data.get("pricing", {})
+                unit_price = pricing.get("unit_price", 0)
+                lines.extend([
+                    "",
+                    f"[Step 6] LLM Output 报价：",
+                    f"💰 参考单价：¥{unit_price:,}/件",
+                    f"📅 预计交期：{quote_data.get('lead_time_days', 0)}天",
+                ])
+            else:
+                lines.extend([
+                    "",
+                    "[Step 6] LLM Output：",
+                    "⚠️ 报价生成中，请联系客服确认最终价格。",
+                    "📎 风险提示：此报价仅为估算值，实际价格可能因图纸复杂度有所调整。",
+                ])
         else:
+            # KB 为空 → 跳过 Step 5 和 Step 6，提示联系客服
             lines.extend([
+                "",
+                f"[Step 5] Rule Engine 工时：",
+                "⚠️ 跳过（KB无匹配数据）",
                 "",
                 "[Step 6] LLM Output：",
-                "⚠️ 报价生成中，请联系客服确认最终价格。",
-                "📎 风险提示：此��价仅为估算值，实际价格可能因图纸复杂度有所调整。",
+                "⚠️ 请联系客服获取准确报价",
             ])
 
         full_text = "\n".join(lines)
