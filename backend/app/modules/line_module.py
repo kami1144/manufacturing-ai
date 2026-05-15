@@ -22,6 +22,7 @@ import httpx
 
 from app.line_config import line_config
 from app.modules.intent_module import intent_classifier
+from app.modules.blueprint_parser import BlueprintParser
 
 
 # ── 常量定义 ─────────────────────────────────────────
@@ -61,10 +62,12 @@ class LINEWebhookHandler:
             print("[WARN] LINE_CHANNEL_SECRET not configured, skipping signature verification")
             return True
 
+        import base64
         key = line_config.LINE_CHANNEL_SECRET.encode()
-        expected = hmac.new(key, body, hashlib.sha256).hexdigest()
+        expected = hmac.new(key, body, hashlib.sha256).digest()
+        signature_bytes = base64.b64decode(signature)
 
-        return hmac.compare_digest(expected, signature)
+        return hmac.compare_digest(expected, signature_bytes)
 
     def parse_events(self, body: dict) -> List[dict]:
         """解析 Webhook 事件
@@ -501,75 +504,75 @@ class ManufacturingLINEBot:
         Returns:
             LINE 消息 dict
         """
-        from app.modules.ocr_module import ocr_image, check_ocr_available
-        from app.modules.blueprint_parser import BlueprintParser
-
-        if not check_ocr_available():
+        from app.modules.ai_module import ai_manufacturing
+        # 优先用 MiniMax 多模态理解图纸（PaddleOCR 不可用时）
+        import base64
+        image_b64 = base64.b64encode(image_bytes).decode()
+        ai_text = await ai_manufacturing.vision(
+            image_b64,
+            "请仔细描述这张制造业图纸的内容，包括：材质、尺寸、数量、工艺要求等所有可见信息。如果有日语或英语的技术标注也请标注。"
+        )
+        if not ai_text:
             return {
                 "type": "text",
-                "text": "⚠️ OCR服务暂不可用，请稍后再试。"
+                "text": "⚠️ 图纸识别服务暂时不可用，请稍后再试，或联系客服手动报价。",
+                "quickReply": {
+                    "items": [
+                        {"type": "action", "action": {"type": "message", "label": "查询报价", "text": "我想查询报价"}},
+                        {"type": "action", "action": {"type": "message", "label": "联系客服", "text": "人工报价"}},
+                    ]
+                }
             }
+        recognized_text = f"[图纸解析]\n{ai_text}"
+        print(f"[DEBUG] Blueprint vision result: {recognized_text[:300]}")
 
+        # 2. BlueprintParser 解析结构化参数
+        parser = BlueprintParser()
+        spec = parser.parse(recognized_text)
+        print(f"[DEBUG] Parsed spec: material={spec.material}, quantity={spec.quantity}, "
+              f"dimensions={spec.dimensions}, weight_kg={spec.weight_kg}, "
+              f"tolerance={spec.tolerance}, surface={spec.surface}")
+
+        # 3. KB 匹配 — 用识别出的文字去知识库查（向量语义搜索）
+        kb_results = []
         try:
-            # 1. OCR 识别图纸内容（同步函数，不用 await）
-            ocr_result = ocr_image(image_bytes=image_bytes, language="en")
-            recognized_text = ocr_result.text
-            print(f"[DEBUG] OCR result: {recognized_text[:200]}")
+            from app.modules.kb_module import get_kb
+            kb = get_kb()
+            kb_results = kb.vector_search(recognized_text, top_k=3)
+            print(f"[DEBUG] KB vector search matched {len(kb_results)} entries")
+        except Exception as kb_err:
+            print(f"[WARN] KB search failed: {kb_err}")
 
-            # 2. BlueprintParser 解析结构化参数
-            parser = BlueprintParser()
-            spec = parser.parse(recognized_text)
-            print(f"[DEBUG] Parsed spec: material={spec.material}, quantity={spec.quantity}, "
-                  f"dimensions={spec.dimensions}, weight_kg={spec.weight_kg}, "
-                  f"tolerance={spec.tolerance}, surface={spec.surface}")
+        # 4. 用解析结果调用报价 API（weight_kg 用解析值）
+        material = spec.material or "SUS304"
+        quantity = spec.quantity if spec.quantity > 0 else 1
+        weight_kg = spec.weight_kg if spec.weight_kg else 1.0
 
-            # 3. KB 匹配 — 用识别出的文字去知识库查（向量语义搜索）
-            kb_results = []
-            try:
-                from app.modules.kb_module import get_kb
-                kb = get_kb()
-                kb_results = kb.vector_search(recognized_text, top_k=3)
-                print(f"[DEBUG] KB vector search matched {len(kb_results)} entries")
-            except Exception as kb_err:
-                print(f"[WARN] KB search failed: {kb_err}")
+        quote_data = None
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.post(
+                    f"{self._base_url}/api/quote/generate",
+                    json={
+                        "material": material,
+                        "quantity": quantity,
+                        "weight_kg": weight_kg,
+                    },
+                )
+                if response.status_code == 200:
+                    quote_data = response.json()
+        except Exception as q_err:
+            print(f"[WARN] Quote API failed: {q_err}")
 
-            # 4. 用解析结果调用报价 API（weight_kg 用解析值）
-            material = spec.material or "SUS304"
-            quantity = spec.quantity if spec.quantity > 0 else 1
-            weight_kg = spec.weight_kg if spec.weight_kg else 1.0
-
-            quote_data = None
-            try:
-                async with httpx.AsyncClient(timeout=15.0) as client:
-                    response = await client.post(
-                        f"{self._base_url}/api/quote/generate",
-                        json={
-                            "material": material,
-                            "quantity": quantity,
-                            "weight_kg": weight_kg,
-                        },
-                    )
-                    if response.status_code == 200:
-                        quote_data = response.json()
-            except Exception as q_err:
-                print(f"[WARN] Quote API failed: {q_err}")
-
-            # 5. 组合回复 — 优先 KB 内容，再附报价
-            return self._build_blueprint_response(
-                recognized_text=recognized_text,
-                kb_results=kb_results,
-                material=material,
-                quantity=quantity,
-                quote_data=quote_data,
-                spec=spec,
-            )
-
-        except Exception as e:
-            print(f"[ERROR] Blueprint OCR error: {e}")
-            return {
-                "type": "text",
-                "text": f"⚠️ 图片处理失败：{str(e)}"
-            }
+        # 5. 组合回复 — 优先 KB 内容，再附报价
+        return self._build_blueprint_response(
+            recognized_text=recognized_text,
+            kb_results=kb_results,
+            material=material,
+            quantity=quantity,
+            quote_data=quote_data,
+            spec=spec,
+        )
 
     def _build_blueprint_response(
         self,
