@@ -640,12 +640,13 @@ class ManufacturingLINEBot:
                     if results:
                         return self._format_knowledge_reply(results)
                     else:
-                        return "未找到相关材质信息。"
+                        # KB 无结果 → 走 AI fallback
+                        return await self._handle_ai_fallback(text)
                 else:
                     return "知识库查询失败，请稍后再试。"
         except Exception as e:
             print(f"[ERROR] Knowledge API error: {e}")
-            return f"材质查询失败：{str(e)}"
+            return "⚠️ 材质查询失败，请稍后再试。"
 
     async def _handle_process(self, text: str, reply_token: str) -> str:
         """处理工艺查询"""
@@ -729,47 +730,17 @@ class ManufacturingLINEBot:
                     if results:
                         return self._format_knowledge_reply(results)
                     else:
-                        return "未找到相关知识，请尝试其他关键词。"
+                        # KB 无结果 → 走 AI fallback
+                        return await self._handle_ai_fallback(text)
                 else:
-                    return "知识库暂不可用。"
+                    return "知识库查询失败，请稍后再试。"
         except Exception as e:
             print(f"[ERROR] Knowledge search error: {e}")
-            return f"知识库查询失败：{str(e)}"
+            return "⚠️ 知识库查询失败，请稍后再试。"
 
     async def _handle_general(self, text: str, reply_token: str) -> str:
-        """处理通用消息 → KB 向量检索 → 无结果时 fallback AI"""
-        try:
-            from app.modules.kb_module import get_kb
-            kb = get_kb()
-            results = kb.vector_search(text, top_k=5)
-            if results:
-                # 优先取最高分，格式化输出
-                best = results[0]
-                content = best["content"]
-                # 截取前 400 字，分段展示
-                if len(content) > 400:
-                    content = content[:400] + "..."
-
-                lines = [
-                    f"📄 {best['title']}",
-                    f"",
-                    content,
-                ]
-                # 如果有多个相关结果，追加
-                if len(results) > 1:
-                    lines.append("")
-                    lines.append("━━━━━━━━━━━")
-                    lines.append("相关条目：")
-                    for r in results[1:4]:
-                        lines.append(f"• {r['title']}")
-
-                return "\n".join(lines)
-            else:
-                # KB 无结果 → 走 AI
-                return await self._handle_ai_fallback(text)
-        except Exception as e:
-            print(f"[ERROR] KB search error: {e}")
-            return "⚠️ 知识库查询失败，请稍后再试。"
+        """处理通用消息 → 不搜 KB，直接走 AI 判断是否在制造业范围内"""
+        return await self._handle_ai_fallback(text)
 
     async def _handle_ai_fallback(self, text: str) -> str:
         """KB 无结果时调用 AI（带回答范围约束）"""

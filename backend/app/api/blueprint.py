@@ -61,76 +61,92 @@ RULE_CATEGORIES = {
     "product": ["product", "产品", "目录", "报价", "价格"],
 }
 
+import logging
+from pathlib import Path
+
+# 本地上传目录
+UPLOAD_DIR = Path.home() / "manufacturing-ai" / "uploads"
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
 
 @router.post("/upload")
 async def upload_blueprint(file: UploadFile = File(...)):
-    """上传图纸/文档 → OCR解析 →存入知识库"""
+    """上传图纸/文档 → 保存本地 + OCR解析 →存入知识库"""
     file_id = str(uuid.uuid4())
     file_bytes = await file.read()
     file_ext = file.filename.split(".")[-1].lower() if file.filename else ""
 
+    # ── 1. 保存原始文件到本地 ──────────────────────────────
+    saved_path = None
+    try:
+        ext = f".{file_ext}" if file_ext else ""
+        saved_path = UPLOAD_DIR / f"{file_id}{ext}"
+        with open(saved_path, "wb") as f:
+            f.write(file_bytes)
+        logger.info(f"File saved: {saved_path}")
+    except Exception as save_err:
+        logger.warning(f"File save failed (continuing without save): {save_err}")
+
+    # ── 2. OCR 解析（如果可用）────────────────────────────
+    ocr_status = "skipped"
+    ocr_result_text = ""
+    ocr_confidence = 0.0
+    ocr_language = "unknown"
+
     try:
         from app.modules.ocr_module import ocr_image, ocr_pdf_page, check_ocr_available
 
-        if not check_ocr_available():
-            return {
-                "file_id": file_id,
-                "filename": file.filename,
-                "status": "uploaded",
-                "ocr_status": "unavailable",
-                "message": "PaddleOCR not installed. Upload successful, OCR skipped."
-            }
-
-        # OCR 解析
-        if file_ext == "pdf":
-            ocr_result = ocr_pdf_page(file_bytes, page_number=0, dpi=200, language="en")
+        if check_ocr_available():
+            if file_ext == "pdf":
+                ocr_result = ocr_pdf_page(file_bytes, page_number=0, dpi=200, language="en")
+            else:
+                ocr_result = ocr_image(image_bytes=file_bytes, language="en")
+            ocr_result_text = ocr_result.text
+            ocr_confidence = ocr_result.confidence
+            ocr_language = ocr_result.language
+            ocr_status = "success"
         else:
-            ocr_result = ocr_image(image_bytes=file_bytes, language="en")
+            ocr_status = "unavailable"
+    except Exception as ocr_err:
+        logger.warning(f"OCR failed: {ocr_err}")
+        ocr_status = f"error: {ocr_err}"
 
-        # 存入知识库
-        kb = get_kb()
-        # 从文件名推断分类
-        fname_lower = file.filename.lower()
-        category = "other"
-        if any(k in fname_lower for k in ["material", "材质", "钢材", "铝"]):
-            category = "material"
-        elif any(k in fname_lower for k in ["process", "工艺", "cnc", "钣金"]):
-            category = "process"
-        elif any(k in fname_lower for k in ["surface", "表面", "电镀", "喷涂"]):
-            category = "surface"
-        elif any(k in fname_lower for k in ["tolerance", "公差", "质量", "spec"]):
-            category = "tolerance"
-        elif any(k in fname_lower for k in ["product", "产品", "目录"]):
-            category = "product"
+    # ── 3. 存入知识库（文字）─────────────────────────────
+    kb = get_kb()
+    fname_lower = file.filename.lower() if file.filename else ""
+    category = "other"
+    if any(k in fname_lower for k in ["material", "材质", "钢材", "铝"]):
+        category = "material"
+    elif any(k in fname_lower for k in ["process", "工艺", "cnc", "钣金"]):
+        category = "process"
+    elif any(k in fname_lower for k in ["surface", "表面", "电镀", "喷涂"]):
+        category = "surface"
+    elif any(k in fname_lower for k in ["tolerance", "公差", "质量", "spec"]):
+        category = "tolerance"
+    elif any(k in fname_lower for k in ["product", "产品", "目录"]):
+        category = "product"
 
+    if ocr_result_text:
         kb.add(
-            title=file.filename,
-            content=ocr_result.text,
+            title=file.filename or "unknown",
+            content=ocr_result_text,
             category=category,
-            source=file.filename
+            source=file.filename or ""
         )
 
-        return {
-            "file_id": file_id,
-            "filename": file.filename,
-            "status": "parsed",
-            "ocr_status": "success",
-            "message": f"Uploaded and stored in KB. KB now has {kb.count()} entries.",
-            "extracted_text": ocr_result.text[:200] + "..." if len(ocr_result.text) > 200 else ocr_result.text,
-            "confidence": ocr_result.confidence,
-            "language": ocr_result.language,
-            "kb_category": category
-        }
-
-    except Exception as e:
-        logger.error(f"OCR/KB error: {e}")
-        return {
-            "file_id": file_id,
-            "filename": file.filename,
-            "status": "uploaded",
-            "ocr_status": "error",
-            "message": f"OCR/KB failed: {str(e)}"
-        }
+    # ── 4. 返回结果 ──────────────────────────────────────
+    return {
+        "file_id": file_id,
+        "filename": file.filename,
+        "saved_path": str(saved_path) if saved_path else None,
+        "status": "parsed" if ocr_status == "success" else "uploaded",
+        "ocr_status": ocr_status,
+        "message": f"Uploaded and stored in KB. KB now has {kb.count()} entries.",
+        "extracted_text": ocr_result_text[:200] + "..." if len(ocr_result_text) > 200 else ocr_result_text,
+        "confidence": ocr_confidence,
+        "language": ocr_language,
+        "kb_category": category
+    }
 
 
 @router.post("/query")
@@ -146,12 +162,18 @@ async def query_blueprint(req: QueryRequest):
     if results:
         # 取最高分结果
         best = results[0]
-        answer = f"【{best['title']}】\n{best['content'][:500]}"
-        sources = ["knowledge_base", best.get("category", "")]
+        # 只有 score >= 1.5 才返回，否则走 AI fallback
+        if best.get("score", 0) >= 1.5:
+            answer = f"【{best['title']}】\n{best['content'][:500]}"
+            sources = ["knowledge_base", best.get("category", "")]
+        else:
+            # KB 相关性太低 → 返回空，让调用方走 AI
+            answer = ""
+            sources = []
     else:
-        # Fallback: 规则匹配
-        answer = await _rule_match(question)
-        sources = ["rules"]
+        # KB 无结果 → 返回空，走 AI fallback
+        answer = ""
+        sources = []
 
     # 更新会话历史
     if session_id not in _sessions:
@@ -174,17 +196,17 @@ async def search_blueprint(req: SearchRequest):
     kb = get_kb()
     results = kb.search(req.query, top_k=req.top_k)
 
+    # 过滤低相关性结果（score < 1.5），避免答非所问
+    # 关键词匹配一个字给30分，必须匹配2个以上关键词才返回
     if results:
-        return {"results": [{"title": r["title"], "content": r["content"][:300]} for r in results]}
+        filtered = [r for r in results if r.get("score", 0) >= 1.5]
+        if filtered:
+            return {"results": [{"title": r["title"], "content": r["content"][:300]} for r in filtered]}
+        # KB 相关性太低 → 返回空，让调用方走 AI fallback
+        return {"results": []}
     else:
-        # Fallback: 规则匹配
-        answer = await _rule_match(req.query.lower())
-        return {
-            "results": [{
-                "title": "规则匹配",
-                "content": answer
-            }]
-        }
+        # KB 完全无结果 → 也返回空，让调用方走 AI fallback
+        return {"results": []}
 
 
 @router.get("/status/{file_id}")
