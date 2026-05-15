@@ -3,14 +3,16 @@ Embedding 模块 - 文字 → 向量
 
 功能：
 - 调用远程 Embedding API 生成文字向量
-- 支持多 provider：Ollama（默认）、OpenAI、火山引擎
+- 支持多 provider：MiniMax（默认）、Ollama、OpenAI、火山引擎
 
 依赖：
 - requests（用于 HTTP 调用）
 - numpy
 
 配置（环境变量）：
-- EMBEDDING_PROVIDER: Ollama/OpenAI/Volcengine（默认：Ollama）
+- EMBEDDING_PROVIDER: MiniMax/Ollama/OpenAI/Volcengine（默认：MiniMax）
+- AI_API_KEY: MiniMax API Key（包含 GroupId，格式：API_Key-GroupId）
+- EMBEDDING_GROUP_ID: MiniMax GroupId（从 AI_API_KEY 解析则不需要）
 - OLLAMA_BASE_URL: Ollama 服务地址（默认：http://localhost:11434）
 - OPENAI_API_KEY: OpenAI API Key
 - OPENAI_EMBEDDING_MODEL: OpenAI embedding 模型（默认：text-embedding-3-small）
@@ -19,16 +21,39 @@ Embedding 模块 - 文字 → 向量
 """
 
 import os
+import re
 import numpy as np
 from typing import List, Optional
 
 
 # ── Provider 配置 ─────────────────────────────────────────────
 
-PROVIDER = os.environ.get("EMBEDDING_PROVIDER", "Ollama").lower()
+PROVIDER = os.environ.get("EMBEDDING_PROVIDER", "MiniMax").lower()
+
+# MiniMax 配置
+AI_API_KEY = os.environ.get("AI_API_KEY", "")
+# AI_API_KEY 格式可能是 "API_Key-GroupId" 或只有 API Key
+# 从中提取 GroupId
+def _parse_minimax_group_id():
+    if "-" in AI_API_KEY:
+        parts = AI_API_KEY.split("-")
+        # 格式：API_Key-GroupId，GroupId 通常在最后
+        if len(parts) >= 2:
+            return parts[-1]
+    return os.environ.get("EMBEDDING_GROUP_ID", "")
+
+MINIMAX_GROUP_ID = os.environ.get("EMBEDDING_GROUP_ID") or _parse_minimax_group_id()
+MINIMAX_API_KEY = AI_API_KEY.split("-")[0] if AI_API_KEY else ""  # 只取 API Key 部分
+MINIMAX_EMBEDDING_MODEL = os.environ.get("MINIMAX_EMBEDDING_MODEL", "embo-01")
+
+# Ollama 配置
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+
+# OpenAI 配置
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_EMBEDDING_MODEL = os.environ.get("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+
+# 火山引擎配置
 VOLCENGINE_API_KEY = os.environ.get("VOLCENGINE_API_KEY", "")
 VOLCENGINE_EMBEDDING_ENDPOINT = os.environ.get(
     "VOLCENGINE_EMBEDDING_ENDPOINT",
@@ -39,6 +64,41 @@ VOLCENGINE_EMBEDDING_ENDPOINT = os.environ.get(
 def _get_provider():
     """获取当前配置的 provider"""
     return PROVIDER
+
+
+# ── MiniMax Provider ─────────────────────────────────────────────
+
+def _minimax_embed_texts(texts: List[str]) -> np.ndarray:
+    """调用 MiniMax embed-text API 生成 embedding"""
+    import requests
+
+    if not MINIMAX_API_KEY:
+        raise ValueError("AI_API_KEY not set")
+    if not MINIMAX_GROUP_ID:
+        raise ValueError("GroupId not set. Set EMBEDDING_GROUP_ID or use format: API_KEY-GroupId in AI_API_KEY")
+
+    embeddings = []
+    url = f"https://api.minimax.chat/v1/text/embeddings?GroupId={MINIMAX_GROUP_ID}"
+    headers = {
+        "Authorization": f"Bearer {MINIMAX_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    for text in texts:
+        resp = requests.post(
+            url,
+            headers=headers,
+            json={
+                "model": MINIMAX_EMBEDDING_MODEL,
+                "texts": [text]
+            },
+            timeout=30
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        embeddings.append(data["data"][0]["embedding"])
+
+    return np.array(embeddings)
 
 
 # ── Ollama Provider ─────────────────────────────────────────────
@@ -147,13 +207,17 @@ def embed_texts(texts: List[str], normalize: bool = True) -> np.ndarray:
 
     provider = _get_provider()
 
-    if provider == "openai":
+    if provider == "minimax":
+        embeddings = _minimax_embed_texts(texts)
+    elif provider == "openai":
         embeddings = _openai_embed_texts(texts)
     elif provider == "volcengine":
         embeddings = _volcengine_embed_texts(texts)
-    else:
-        # 默认 Ollama
+    elif provider == "ollama":
         embeddings = _ollama_embed_texts(texts)
+    else:
+        # 默认 MiniMax
+        embeddings = _minimax_embed_texts(texts)
 
     # 归一化
     if normalize:
@@ -215,10 +279,17 @@ if __name__ == "__main__":
     import requests
 
     print(f"Testing embedding module (provider: {PROVIDER})...")
-    print(f"Ollama URL: {OLLAMA_BASE_URL}")
+
+    # 检查 MiniMax 配置
+    if PROVIDER == "minimax":
+        print(f"MiniMax GroupId: {MINIMAX_GROUP_ID}")
+        if not MINIMAX_API_KEY or not MINIMAX_GROUP_ID:
+            print("[ERROR] AI_API_KEY and EMBEDDING_GROUP_ID must be set")
+            sys.exit(1)
 
     # 检查 Ollama 连接
     if PROVIDER == "ollama":
+        print(f"Ollama URL: {OLLAMA_BASE_URL}")
         try:
             resp = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5)
             if resp.status_code == 200:
