@@ -36,6 +36,11 @@ SCENE_KEYWORDS = {
     "knowledge": ["知识", "规格", "标准", "spec"],
 }
 
+# 报价流程 QuickReply 选项
+QUOTE_MATERIAL_OPTIONS = ["SUS304", "SUS303", "SECC", "SPCC", "ADC12", "A5052", "其他材质"]
+QUOTE_QUANTITY_OPTIONS = ["1-10件", "11-50件", "51-100件", "100+件"]
+QUOTE_PROCESS_OPTIONS = ["CNC加工", "钣金加工", "压铸铸造", "表面处理"]
+
 
 # ── LINE Webhook handler ─────────────────────────────────
 
@@ -135,6 +140,45 @@ class LINEWebhookHandler:
         return event.get("type", "")
 
 
+# ── 用户报价状态管理 ────────────────────────────────
+
+class UserQuoteState:
+    """用户报价状态管理器
+
+    用于暂存用户报价流程中收集的参数，
+    支持分阶段收集：材质 → 数量 → 工艺 → 报价
+    """
+
+    def __init__(self):
+        # user_id -> {material, quantity, process}
+        self._states: dict = {}
+
+    def get_state(self, user_id: str) -> dict:
+        """获取用户状态"""
+        return self._states.get(user_id, {})
+
+    def update_state(self, user_id: str, **kwargs) -> dict:
+        """更新用户状态"""
+        if user_id not in self._states:
+            self._states[user_id] = {}
+        self._states[user_id].update(kwargs)
+        return self._states[user_id]
+
+    def clear_state(self, user_id: str) -> None:
+        """清除用户状态"""
+        if user_id in self._states:
+            del self._states[user_id]
+
+    def is_complete(self, user_id: str) -> bool:
+        """检查参数是否完整（材质+数量+工艺）"""
+        state = self._states.get(user_id, {})
+        return bool(state.get("material") and state.get("quantity") and state.get("process"))
+
+
+# 全局实例
+user_quote_state = UserQuoteState()
+
+
 # ── Manufacturing LINE Bot ────────────────────────────
 
 class ManufacturingLINEBot:
@@ -150,6 +194,7 @@ class ManufacturingLINEBot:
     def __init__(self):
         self.webhook_handler = LINEWebhookHandler()
         self._base_url = os.getenv("API_BASE_URL", "http://localhost:8000")
+        self._state = user_quote_state  # 引用全局状态管理器
 
     async def download_line_image(self, message_id: str) -> bytes:
         """从 LINE 服务器下载图片
@@ -260,7 +305,7 @@ class ManufacturingLINEBot:
 
         # 根据场景调用不同 API
         if scene == "quote":
-            result = await self._handle_quote(text, reply_token)
+            result = await self._handle_quote(text, reply_token, user_id)
         elif scene == "material":
             result = await self._handle_material(text, reply_token)
         elif scene == "process":
@@ -280,28 +325,99 @@ class ManufacturingLINEBot:
 
         return result
 
-    async def _handle_quote(self, text: str, reply_token: str) -> str:
-        """处理报价咨询"""
+    async def _handle_quote(self, text: str, reply_token: str, user_id: str) -> str:
+        """处理报价咨询 - 分阶段需求收集"""
         import re
 
-        # 提取材质信息
-        material_match = re.search(r"(SUS\d+|SECC|SPCC|ADC\d+)", text.upper())
-        material = material_match.group(0) if material_match else "SUS304"
+        # 获取当前状态
+        state = self._state.get_state(user_id)
 
-        # 提取数量
+        # ── 优先处理 QuickReply 按钮回复 ──
+        # 检查是否回复了材质
+        for mat in QUOTE_MATERIAL_OPTIONS:
+            if mat in text or (mat == "其他材质" and "材质" in text):
+                state = self._state.update_state(user_id, material=mat if mat != "其他材质" else "其他")
+                break
+
+        # 检查是否回复了数量
+        for qty_opt in QUOTE_QUANTITY_OPTIONS:
+            if qty_opt in text:
+                # 转换为数值范围
+                if qty_opt == "1-10件":
+                    quantity = 5
+                elif qty_opt == "11-50件":
+                    quantity = 30
+                elif qty_opt == "51-100件":
+                    quantity = 75
+                else:  # 100+件
+                    quantity = 100
+                state = self._state.update_state(user_id, quantity=quantity, quantity_raw=qty_opt)
+                break
+
+        # 检查是否回复了工艺
+        for proc in QUOTE_PROCESS_OPTIONS:
+            if proc in text:
+                state = self._state.update_state(user_id, process=proc)
+                break
+
+        # ── 从文本提取已有关键信息（优先于 QuickReply） ──
+        # 材质
+        material_match = re.search(r"(SUS\d+|SECC|SPCC|ADC\d+|A5052)", text.upper())
+        if material_match and not state.get("material"):
+            state = self._state.update_state(user_id, material=material_match.group(0))
+
+        # 数量
         qty_match = re.search(r"(\d+)\s*(?:个|件|pcs|pieces|個|枚)", text)
-        quantity = int(qty_match.group(1)) if qty_match else 1
+        if qty_match and not state.get("quantity"):
+            state = self._state.update_state(
+                user_id,
+                quantity=int(qty_match.group(1)),
+                quantity_raw=f"{qty_match.group(1)}件",
+            )
 
-        # 提取交期
-        delivery_match = re.search(r"(\d+)\s*(?:天|days?|週間)", text)
-        lead_time = int(delivery_match.group(1)) if delivery_match else None
+        # 工艺
+        for proc in QUOTE_PROCESS_OPTIONS:
+            if proc.replace("处理", "").replace("加工", "").replace("铸造", "") in text:
+                state = self._state.update_state(user_id, process=proc)
+                break
 
-        # 调用报价 API
+        # ── 检查缺少什么参数 ──
+        missing = []
+        if not state.get("material"):
+            missing.append("material")
+        if not state.get("quantity"):
+            missing.append("quantity")
+        if not state.get("process"):
+            missing.append("process")
+
+        # ── 参数齐全 → 调用报价 API ──
+        if not missing:
+            return await self._call_quote_api(user_id, state)
+
+        # ── 参数不全 → 用 QuickReply 询问 ──
+        return self._create_quote_ask_message(state, missing)
+
+    async def _call_quote_api(self, user_id: str, state: dict) -> str:
+        """调用报价 API"""
+        # 清理状态
+        self._state.clear_state(user_id)
+
+        material = state.get("material", "SUS304")
+        quantity = state.get("quantity", 1)
+        process = state.get("process", "CNC加工")
+
+        # 提取交期（如果有）
+        lead_time = None
+        lead_match = re.search(r"(\d+)\s*(?:天|days?|週間)", state.get("_last_text", ""))
+        if lead_match:
+            lead_time = int(lead_match.group(1))
+
         try:
             payload = {
                 "material": material,
                 "quantity": quantity,
                 "weight_kg": 1.0,
+                "process_category": process,
             }
             if lead_time:
                 payload["lead_time_days"] = lead_time
@@ -313,13 +429,68 @@ class ManufacturingLINEBot:
                 )
                 if response.status_code == 200:
                     data = response.json()
-                    # 返回 Flex Message dict（由 line_api.py 负责发送）
                     return self.create_quote_flex_message(data)
                 else:
                     return {"type": "text", "text": "抱歉，报价服务暂不可用，请稍后再试。"}
         except Exception as e:
             print(f"[ERROR] Quote API error: {e}")
             return f"报价查询失败：{str(e)}"
+
+    def _create_quote_ask_message(self, state: dict, missing: list) -> dict:
+        """创建报价询问消息（带 QuickReply）"""
+        # 构建问题文本
+        parts = []
+        if "material" in missing:
+            parts.append("请选择或输入材质（如 SUS304、SECC 等）")
+        if "quantity" in missing:
+            parts.append("请选择数量范围")
+        if "process" in missing:
+            parts.append("请选择加工工艺")
+
+        question = "，".join(parts)
+        text = f"📋 为了给您准确报价，请提供以下信息：\n{question}"
+
+        # 构建 QuickReply
+        quick_reply_items = []
+
+        if "material" in missing:
+            for mat in QUOTE_MATERIAL_OPTIONS:
+                quick_reply_items.append({
+                    "type": "action",
+                    "action": {
+                        "type": "message",
+                        "label": mat,
+                        "text": mat,
+                    },
+                })
+
+        if "quantity" in missing:
+            for qty in QUOTE_QUANTITY_OPTIONS:
+                quick_reply_items.append({
+                    "type": "action",
+                    "action": {
+                        "type": "message",
+                        "label": qty,
+                        "text": qty,
+                    },
+                })
+
+        if "process" in missing:
+            for proc in QUOTE_PROCESS_OPTIONS:
+                quick_reply_items.append({
+                    "type": "action",
+                    "action": {
+                        "type": "message",
+                        "label": proc,
+                        "text": proc,
+                    },
+                })
+
+        return {
+            "type": "text",
+            "text": text,
+            "quickReply": {"items": quick_reply_items[:13]},  # LINE 限制13个按钮
+        }
 
     async def process_blueprint_image(self, image_bytes: bytes) -> dict:
         """对图纸图片进行OCR → KB匹配 → 报价 → 回复用户
