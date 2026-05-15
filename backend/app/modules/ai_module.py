@@ -105,6 +105,68 @@ class AIManufacturing:
         except Exception as e:
             return f"⚠️ AI 异常：{str(e)}"
 
+    async def vision(self, image_base64: str, prompt: str = "请描述这张图片的内容") -> str:
+        """
+        使用 mmx CLI 进行图片识别
+
+        Args:
+            image_base64: 图片 base64 编码（不含 data:image/...;base64, 前缀）
+            prompt: 提问
+
+        Returns:
+            AI 对图片的描述
+        """
+        import base64
+        import subprocess
+        import tempfile
+        import os
+
+        mmx_path = "/Users/jinyonghao/.npm-global/bin/mmx"
+
+        # 将 base64 解码并保存为临时文件
+        try:
+            image_data = base64.b64decode(image_base64)
+        except Exception as e:
+            print(f"[ERROR] Failed to decode base64: {e}")
+            return ""
+
+        # 创建临时图片文件
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_file:
+            tmp_file.write(image_data)
+            image_path = tmp_file.name
+
+        try:
+            # 调用 mmx vision describe
+            result = subprocess.run(
+                [mmx_path, "vision", "describe", "--image", image_path],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            print(f"[DEBUG] mmx vision returncode: {result.returncode}")
+            if result.returncode != 0:
+                print(f"[ERROR] mmx vision stderr: {result.stderr}")
+                return ""
+
+            # 将用户 prompt 融入结果
+            description = result.stdout.strip()
+            if prompt and prompt != "请描述这张图片的内容":
+                description = f"{prompt}\n\n{description}"
+
+            return description
+        except subprocess.TimeoutExpired:
+            print("[ERROR] mmx vision timeout")
+            return ""
+        except Exception as e:
+            print(f"[ERROR] mmx vision failed: {e}")
+            return ""
+        finally:
+            # 清理临时文件
+            try:
+                os.unlink(image_path)
+            except Exception:
+                pass
+
 
 # 全局实例
 ai_manufacturing = AIManufacturing()
