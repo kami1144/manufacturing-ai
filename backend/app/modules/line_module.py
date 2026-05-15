@@ -518,11 +518,14 @@ class ManufacturingLINEBot:
 
         # ── Step 1: OCR/Vision ─────────────────────────────────────────────
         image_b64 = base64.b64encode(image_bytes).decode()
-        vision_result = await ai_manufacturing.vision(
+        vision_dict = await ai_manufacturing.vision(
             image_b64,
-            "请仔细描述这张制造业图纸的内容，包括：材质、尺寸、数量、孔数量、公差、表面处理要求、工艺要求等所有可见信息。如果有日语或英语的技术标注也请标注。识别所有可视化的标注。"
+            "请分析这张制造业图纸，以JSON格式输出以下结构化参数（只输出JSON，不要其他内容）：\n"
+            "{\"材质\": \"...\", \"数量\": \"...\", \"主要尺寸\": \"...\", \"重量kg\": \"...\", \"板厚mm\": \"...\", \"孔数量\": \"...\", \"对称性\": \"...\", \"结构类型\": \"...\", \"工艺要求\": \"...\", \"公差要求\": \"...\", \"表面处理\": \"...\"}\n"
+            "如果某项无法从图纸判断，填\"未标注\"。"
         )
-        if not vision_result:
+        # 检查是否有错误
+        if not vision_dict or isinstance(vision_dict, str):
             return {
                 "type": "text",
                 "text": "⚠️ 图纸识别服务暂时不可用，请稍后再试，或联系客服手动报价。",
@@ -533,55 +536,50 @@ class ManufacturingLINEBot:
                     ]
                 }
             }
+        if "error" in vision_dict:
+            return {
+                "type": "text",
+                "text": f"⚠️ 图纸识别出错：{vision_dict['error']}，请稍后再试，或联系客服手动报价。",
+                "quickReply": {
+                    "items": [
+                        {"type": "action", "action": {"type": "message", "label": "查询报价", "text": "我想查询报价"}},
+                        {"type": "action", "action": {"type": "message", "label": "联系客服", "text": "人工报价"}},
+                    ]
+                }
+            }
 
-        step1_text = f"[Step 1] OCR/Vision 识别结果：\n{vision_result}"
-        steps_output.append({"step": 1, "name": "OCR/Vision", "content": vision_result})
-        print(f"[DEBUG] Step 1 - Vision: {vision_result[:200]}...")
+        # 解析 JSON 内容
+        import json
+        import re
+        vision_content = vision_dict.get("content", "{}")
+        # 尝试从 content 中提取 JSON 对象
+        json_match = re.search(r'\{[^{}]*\}', vision_content)
+        if json_match:
+            try:
+                struct_data = json.loads(json_match.group())
+            except json.JSONDecodeError:
+                struct_data = {}
+        else:
+            struct_data = {}
 
-        # 2. BlueprintParser 解析结构化参数
-        parser = BlueprintParser()
-        recognized_text = f"[图纸解析]\n{vision_result}"
-        spec = parser.parse(recognized_text)
-        print(f"[DEBUG] Parsed spec: material={spec.material}, quantity={spec.quantity}, "
-              f"dimensions={spec.dimensions}, weight_kg={spec.weight_kg}, "
-              f"tolerance={spec.tolerance}, surface={spec.surface}")
+        step1_text = f"[Step 1] OCR/Vision 识别结果：\n{vision_content}"
+        steps_output.append({"step": 1, "name": "OCR/Vision", "content": vision_content})
+        print(f"[DEBUG] Step 1 - Vision: {vision_content[:200]}...")
 
         # ── Step 2: Feature Extraction ─────────────────────────────────
-        # 从解析结果提取特征：孔数量/板厚/对称性/结构类型
+        # 从结构化 JSON 数据提取特征
         features = {
-            "material": spec.material or "未知",
-            "quantity": spec.quantity if spec.quantity > 0 else 1,
-            "dimensions": spec.dimensions or "未知",
-            "weight_kg": spec.weight_kg if spec.weight_kg else 1.0,
-            "tolerance": spec.tolerance or "普通",
-            "surface": spec.surface or "无特殊要求",
-            "thickness": "未知",
-            "hole_count": 0,
-            "symmetry": "未知",
-            "structure_type": "未知",
+            "material": struct_data.get("材质", "未知"),
+            "quantity": int(struct_data.get("数量", 1)) if struct_data.get("数量", "1").isdigit() else 1,
+            "dimensions": struct_data.get("主要尺寸", "未知"),
+            "weight_kg": float(struct_data.get("重量kg", 1.0)) if struct_data.get("重量kg", "1.0").replace(".", "").isdigit() else 1.0,
+            "tolerance": struct_data.get("公差要求", "普通"),
+            "surface": struct_data.get("表面处理", "无特殊要求"),
+            "thickness": struct_data.get("板厚mm", "未知"),
+            "hole_count": int(struct_data.get("孔数量", 0)) if struct_data.get("孔数量", "0").isdigit() else 0,
+            "symmetry": struct_data.get("对称性", "未知"),
+            "structure_type": struct_data.get("结构类型", "未知"),
         }
-
-        # 尝试从 vision_result 中提取更多特征
-        vision_lower = vision_result.lower()
-        # 提取板厚
-        import re
-        thickness_match = re.search(r"(\d+\.?\d*)\s*mm", vision_result)
-        if thickness_match:
-            features["thickness"] = thickness_match.group(1) + "mm"
-        # 提取孔数量
-        hole_match = re.search(r"孔[：:]?\s*(\d+)|(\d+)\s*个孔", vision_result)
-        if hole_match:
-            features["hole_count"] = int(hole_match.group(1) or hole_match.group(2))
-        # 判断对称性
-        if any(w in vision_lower for w in ["对称", "对称性", "symmetric"]):
-            features["symmetry"] = "对称"
-        # 判断结构类型
-        if any(w in vision_lower for w in ["圆形", "圆板", "circular"]):
-            features["structure_type"] = "圆形零件"
-        elif any(w in vision_lower for w in ["方形", "方形零件", "square"]):
-            features["structure_type"] = "方形零件"
-        else:
-            features["structure_type"] = "不规则形状"
 
         step2_text = (
             f"[Step 2] Feature Extraction 特征提取：\n"
@@ -599,7 +597,7 @@ class ManufacturingLINEBot:
 
         # ── Step 3: Process Classification ────────────────────────────
         # 判断加工工艺类型：铸造/CNC/板金
-        process_type = self._classify_process(features, vision_result)
+        process_type = self._classify_process(features, vision_content)
         step3_text = f"[Step 3] Process Classification 工艺判断：\n{process_type}"
         steps_output.append({"step": 3, "name": "Process Classification", "content": process_type})
         print(f"[DEBUG] Step 3 - Process: {process_type}")
@@ -609,7 +607,7 @@ class ManufacturingLINEBot:
         try:
             from app.modules.kb_module import get_kb
             kb = get_kb()
-            kb_results = kb.vector_search(recognized_text, top_k=3)
+            kb_results = kb.vector_search(vision_content, top_k=3)
             print(f"[DEBUG] Step 4 - KB matched {len(kb_results)} entries")
         except Exception as kb_err:
             print(f"[WARN] KB search failed: {kb_err}")
@@ -630,9 +628,9 @@ class ManufacturingLINEBot:
 
         if has_kb_data:
             # KB 有数据 → 进行工时估算
-            material = spec.material or "SUS304"
-            quantity = spec.quantity if spec.quantity > 0 else 1
-            weight_kg = spec.weight_kg if spec.weight_kg else 1.0
+            material = features.get("material", "SUS304")
+            quantity = features.get("quantity", 1)
+            weight_kg = features.get("weight_kg", 1.0)
             process_category = process_type
 
             # 基于规则的工时估算
@@ -663,9 +661,9 @@ class ManufacturingLINEBot:
                     response = await client.post(
                         f"{self._base_url}/api/quote/generate",
                         json={
-                            "material": spec.material or "SUS304",
-                            "quantity": spec.quantity if spec.quantity > 0 else 1,
-                            "weight_kg": spec.weight_kg if spec.weight_kg else 1.0,
+                            "material": features.get("material", "SUS304"),
+                            "quantity": features.get("quantity", 1),
+                            "weight_kg": features.get("weight_kg", 1.0),
                             "process_category": process_type,
                         },
                     )
@@ -695,7 +693,7 @@ class ManufacturingLINEBot:
         # ── 组合 6 步输出 ─────────────────────────────────────────
         return self._build_6step_response(
             steps_output=steps_output,
-            vision_result=vision_result,
+            vision_result=vision_content,
             features=features,
             process_type=process_type,
             kb_text=kb_text,

@@ -105,7 +105,7 @@ class AIManufacturing:
         except Exception as e:
             return f"⚠️ AI 异常：{str(e)}"
 
-    async def vision(self, image_base64: str, prompt: str = "请描述这张图片的内容") -> str:
+    async def vision(self, image_base64: str, prompt: str = "请描述这张图片的内容") -> dict:
         """
         使用 mmx CLI 进行图片识别
 
@@ -114,7 +114,7 @@ class AIManufacturing:
             prompt: 提问
 
         Returns:
-            AI 对图片的描述
+            包含 content 字段的 dict，或包含 error 字段的 dict
         """
         import base64
         import json
@@ -129,7 +129,7 @@ class AIManufacturing:
             image_data = base64.b64decode(image_base64)
         except Exception as e:
             print(f"[ERROR] Failed to decode base64: {e}")
-            return ""
+            return {"error": str(e)}
 
         # 创建临时图片文件
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_file:
@@ -147,27 +147,25 @@ class AIManufacturing:
             print(f"[DEBUG] mmx vision returncode: {result.returncode}")
             if result.returncode != 0:
                 print(f"[ERROR] mmx vision stderr: {result.stderr}")
-                return ""
+                return {"error": result.stderr}
 
             # 解析 JSON 输出，提取 content 字段
             try:
                 output = json.loads(result.stdout)
-                description = output.get("content", "")
-                print(f"[DEBUG] mmx content: {description[:200]}...")
+                content = output.get("content", "")
+                print(f"[DEBUG] mmx content: {content[:200]}...")
+                return {"content": content, "raw": result.stdout}
             except json.JSONDecodeError as e:
                 print(f"[ERROR] Failed to parse mmx JSON: {e}")
                 print(f"[DEBUG] mmx stdout: {result.stdout[:500]}")
-                description = result.stdout.strip()
-            if prompt and prompt != "请描述这张图片的内容":
-                description = f"{prompt}\n\n{description}"
-
-            return description
+                # 不是 JSON，返回原始文本
+                return {"content": result.stdout.strip(), "raw": result.stdout}
         except subprocess.TimeoutExpired:
             print("[ERROR] mmx vision timeout")
-            return ""
+            return {"error": "timeout"}
         except Exception as e:
             print(f"[ERROR] mmx vision failed: {e}")
-            return ""
+            return {"error": str(e)}
         finally:
             # 清理临时文件
             try:
