@@ -2,34 +2,135 @@
 Embedding 模块 - 文字 → 向量
 
 功能：
-- 调用 Sentence-Transformers 生成文字向量
-- 支持多语言（日语/中文/英语）
-- 提供批量编码接口
+- 调用远程 Embedding API 生成文字向量
+- 支持多 provider：Ollama（默认）、OpenAI、火山引擎
 
-依赖：sentence-transformers
+依赖：
+- requests（用于 HTTP 调用）
+- numpy
+
+配置（环境变量）：
+- EMBEDDING_PROVIDER: Ollama/OpenAI/Volcengine（默认：Ollama）
+- OLLAMA_BASE_URL: Ollama 服务地址（默认：http://localhost:11434）
+- OPENAI_API_KEY: OpenAI API Key
+- OPENAI_EMBEDDING_MODEL: OpenAI embedding 模型（默认：text-embedding-3-small）
+- VOLCENGINE_API_KEY: 火山引擎 API Key
+- VOLCENGINE_EMBEDDING_ENDPOINT: 火山引擎 endpoint
 """
 
+import os
 import numpy as np
 from typing import List, Optional
 
 
-# 全局模型实例（懒加载）
-_model = None
+# ── Provider 配置 ─────────────────────────────────────────────
+
+PROVIDER = os.environ.get("EMBEDDING_PROVIDER", "Ollama").lower()
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_EMBEDDING_MODEL = os.environ.get("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+VOLCENGINE_API_KEY = os.environ.get("VOLCENGINE_API_KEY", "")
+VOLCENGINE_EMBEDDING_ENDPOINT = os.environ.get(
+    "VOLCENGINE_EMBEDDING_ENDPOINT",
+    "https://ark.cn-beijing.volces.com/api/v3/embeddings/text_embedding"
+)
 
 
-def get_embedding_model():
-    """获取或加载 Sentence-Transformers 模型"""
-    global _model
-    if _model is None:
-        print("[INFO] Loading Sentence-Transformers model...")
-        from sentence_transformers import SentenceTransformer
-        # 多语言模型，支持中日英
-        # paraphrase-multilingual-MiniLM-L12-v2: 384维，较小较快
-        # intfloat/multilingual-e5-small: 384维，效果更好
-        _model = SentenceTransformer("intfloat/multilingual-e5-small")
-        print("[INFO] Model loaded.")
-    return _model
+def _get_provider():
+    """获取当前配置的 provider"""
+    return PROVIDER
 
+
+# ── Ollama Provider ─────────────────────────────────────────────
+
+def _ollama_embed_texts(texts: List[str], model: str = "multilingual-e5-small") -> np.ndarray:
+    """调用 Ollama 生成 embedding"""
+    import requests
+
+    embeddings = []
+    url = f"{OLLAMA_BASE_URL}/api/embeddings"
+
+    for text in texts:
+        resp = requests.post(
+            url,
+            json={"model": model, "prompt": text},
+            timeout=30
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        embeddings.append(data["embedding"])
+
+    return np.array(embeddings)
+
+
+# ── OpenAI Provider ─────────────────────────────────────────────
+
+def _openai_embed_texts(texts: List[str]) -> np.ndarray:
+    """调用 OpenAI API 生成 embedding"""
+    import requests
+
+    if not OPENAI_API_KEY:
+        raise ValueError("OPENAI_API_KEY not set")
+
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    embeddings = []
+
+    for text in texts:
+        resp = requests.post(
+            "https://api.openai.com/v1/embeddings",
+            headers=headers,
+            json={
+                "input": text,
+                "model": OPENAI_EMBEDDING_MODEL,
+                "encoding_format": "float"
+            },
+            timeout=30
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        embeddings.append(data["data"][0]["embedding"])
+
+    return np.array(embeddings)
+
+
+# ── 火山引擎 Provider ─────────────────────────────────────────
+
+def _volcengine_embed_texts(texts: List[str]) -> np.ndarray:
+    """调用火山引擎 API 生成 embedding"""
+    import requests
+
+    if not VOLCENGINE_API_KEY:
+        raise ValueError("VOLCENGINE_API_KEY not set")
+
+    embeddings = []
+
+    for text in texts:
+        # 火山引擎请求体格式
+        payload = {
+            "input": text,
+        }
+        headers = {
+            "Authorization": f"Bearer {VOLCENGINE_API_KEY}",
+            "Content-Type": "application/json"
+        }
+
+        resp = requests.post(
+            VOLCENGINE_EMBEDDING_ENDPOINT,
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        embeddings.append(data["data"][0]["embedding"])
+
+    return np.array(embeddings)
+
+
+# ── 统一入口函数 ─────────────────────────────────────────────
 
 def embed_texts(texts: List[str], normalize: bool = True) -> np.ndarray:
     """将文字列表转为向量
@@ -41,8 +142,24 @@ def embed_texts(texts: List[str], normalize: bool = True) -> np.ndarray:
     Returns:
         numpy array, shape (n, embedding_dim)
     """
-    model = get_embedding_model()
-    embeddings = model.encode(texts, normalize_embeddings=normalize)
+    if not texts:
+        return np.array([])
+
+    provider = _get_provider()
+
+    if provider == "openai":
+        embeddings = _openai_embed_texts(texts)
+    elif provider == "volcengine":
+        embeddings = _volcengine_embed_texts(texts)
+    else:
+        # 默认 Ollama
+        embeddings = _ollama_embed_texts(texts)
+
+    # 归一化
+    if normalize:
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        embeddings = embeddings / (norms + 1e-8)
+
     return embeddings
 
 
@@ -95,8 +212,24 @@ def search_by_similarity(
 
 if __name__ == "__main__":
     import sys
+    import requests
 
-    print("Testing embedding module...")
+    print(f"Testing embedding module (provider: {PROVIDER})...")
+    print(f"Ollama URL: {OLLAMA_BASE_URL}")
+
+    # 检查 Ollama 连接
+    if PROVIDER == "ollama":
+        try:
+            resp = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5)
+            if resp.status_code == 200:
+                models = resp.json().get("models", [])
+                print(f"Available models: {[m.get('name') for m in models]}")
+            else:
+                print(f"[WARN] Ollama status: {resp.status_code}")
+        except Exception as e:
+            print(f"[WARN] Cannot connect to Ollama: {e}")
+            print("Make sure Ollama is running: ollama serve")
+            sys.exit(1)
 
     texts = [
         "SUS304不锈钢的抗拉强度是多少",
@@ -104,14 +237,18 @@ if __name__ == "__main__":
         "SECC镀锌钢板的规格参数",
     ]
 
-    embeddings = embed_texts(texts)
-    print(f"Generated {len(embeddings)} embeddings, shape: {embeddings[0].shape}")
-    print(f"Sample vector (first 5 dims): {embeddings[0][:5]}")
+    try:
+        embeddings = embed_texts(texts)
+        print(f"Generated {len(embeddings)} embeddings, shape: {embeddings[0].shape}")
+        print(f"Sample vector (first 5 dims): {embeddings[0][:5]}")
 
-    # 测试相似度
-    q = "不锈钢材质的技术参数"
-    q_emb = embed_text(q)
-    scores = [cosine_similarity(q_emb, e) for e in embeddings]
-    print(f"\nQuery: '{q}'")
-    for i, score in enumerate(scores):
-        print(f"  Score with '{texts[i]}': {score:.4f}")
+        # 测试相似度
+        q = "不锈钢材质的技术参数"
+        q_emb = embed_text(q)
+        scores = [cosine_similarity(q_emb, e) for e in embeddings]
+        print(f"\nQuery: '{q}'")
+        for i, score in enumerate(scores):
+            print(f"  Score with '{texts[i]}': {score:.4f}")
+    except Exception as e:
+        print(f"[ERROR] {e}")
+        sys.exit(1)
