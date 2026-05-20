@@ -1,10 +1,18 @@
+import os
+from pathlib import Path
+
+# 加载 .env 文件（必须在 import 其他模块之前）
+env_path = Path(__file__).parent.parent / ".env"
+if env_path.exists():
+    from dotenv import load_dotenv
+    load_dotenv(env_path)
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-import os
 
-from app.api import blueprint, health, quote, line_api
+from app.api import blueprint, health, quote, line_api, realestate
 
 
 app = FastAPI(title="Manufacturing AI API", version="0.1.0")
@@ -21,6 +29,7 @@ app.include_router(health.router, prefix="/api")
 app.include_router(blueprint.router, prefix="/api/blueprint")
 app.include_router(quote.router, prefix="/api/quote")
 app.include_router(line_api.router)
+app.include_router(realestate.router)
 
 
 # SPA fallback - serve index.html for unknown routes (must be last)
