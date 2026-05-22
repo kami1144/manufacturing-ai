@@ -230,7 +230,52 @@ class WorkflowRunner:
         context: dict,
         workflow_result: WorkflowResult,
     ) -> Any:
-        """Resolve a single placeholder string."""
+        """Resolve placeholder(s) in a string value.
+
+        Supports two forms:
+          - Single: "{step_x.output.field}"
+          - Multi:  "{step_x.output.field1} {step_x.output.field2}"
+        """
+        if not isinstance(value, str):
+            return value
+
+        # Short-circuit if no braces at all
+        if "{" not in value:
+            return value
+
+        # Multi-placeholder: "{a} {b}" — resolve each segment
+        if value.startswith("{"):
+            # Check if there are multiple placeholders by looking for whitespace between braces
+            # e.g. "{step_2.output.material} {step_2.output.dimensions}"
+            import re
+            # Match each {placeholder} segment
+            pattern = r"\{[^}]+\}"
+            segments = re.split(pattern, value)
+            matches = re.findall(pattern, value)
+
+            if len(matches) > 1:
+                # Multiple placeholders — resolve each and rebuild the string
+                import re
+                result = value
+                for ph in matches:
+                    resolved = self._resolve_single(ph.strip(), context, workflow_result)
+                    resolved_str = str(resolved) if resolved is not None else ph
+                    result = result.replace(ph, resolved_str, 1)
+                return result
+
+            # Single placeholder
+            return self._resolve_single(value, context, workflow_result)
+
+        # No braces — return as-is
+        return value
+
+    def _resolve_single(
+        self,
+        value: str,
+        context: dict,
+        workflow_result: WorkflowResult,
+    ) -> Any:
+        """Resolve a single placeholder string (must start with '{')."""
         if not isinstance(value, str) or not value.startswith("{"):
             return value
 

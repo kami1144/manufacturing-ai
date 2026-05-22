@@ -31,7 +31,8 @@ from typing import List, Optional
 PROVIDER = os.environ.get("EMBEDDING_PROVIDER", "MiniMax").lower()
 
 # MiniMax 配置
-AI_API_KEY = os.environ.get("AI_API_KEY", "")
+# 优先读 AI_API_KEY，回退到 MINIMAX_API_KEY（兼容其他项目设置的 env 变量名）
+AI_API_KEY=os.environ.get("AI_API_KEY") or os.environ.get("MINIMAX_API_KEY", "")
 # AI_API_KEY 格式可能是 "API_Key-GroupId" 或只有 API Key
 # 从中提取 GroupId
 def _parse_minimax_group_id():
@@ -115,22 +116,27 @@ def _minimax_embed_texts(texts: List[str]) -> np.ndarray:
 
 # ── Ollama Provider ─────────────────────────────────────────────
 
-def _ollama_embed_texts(texts: List[str], model: str = "multilingual-e5-small") -> np.ndarray:
-    """调用 Ollama 生成 embedding"""
+def _ollama_embed_texts(texts: List[str], model: str = "nomic-embed-text") -> np.ndarray:
+    """调用 Ollama 生成 embedding（兼容 v0.24+ /api/embed 接口）"""
     import requests
 
     embeddings = []
-    url = f"{OLLAMA_BASE_URL}/api/embeddings"
+    # Ollama v0.24+ 使用 /api/embed，参数为 input
+    url = f"{OLLAMA_BASE_URL}/api/embed"
 
     for text in texts:
         resp = requests.post(
             url,
-            json={"model": model, "prompt": text},
+            json={"model": model, "input": text},
             timeout=30
         )
         resp.raise_for_status()
         data = resp.json()
-        embeddings.append(data["embedding"])
+        # v0.24 返回 {"embeddings": [[...]], "model": "..."}
+        embedding = data.get("embedding") or (data.get("embeddings", [[]])[0] if data.get("embeddings") else [])
+        if not embedding:
+            raise ValueError(f"Ollama returned empty embedding for: {text[:20]}")
+        embeddings.append(embedding)
 
     return np.array(embeddings)
 
