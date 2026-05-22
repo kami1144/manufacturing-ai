@@ -294,6 +294,7 @@ async def generate_quote(blueprint_data: Optional[dict] = None):
     return {
         "quote_id": str(uuid.uuid4()),
         "filename": filename,
+        "material": material,
         "process_category": process_category,
         "pricing": {
             "unit_price": unit_price,

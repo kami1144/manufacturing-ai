@@ -105,7 +105,7 @@ class AIManufacturing:
         except Exception as e:
             return f"⚠️ AI 异常：{str(e)}"
 
-    async def vision(self, image_base64: str, prompt: str = "请描述这张图片的内容") -> dict:
+    async def vision(self, image_base64: str, prompt: str = "请详细描述这张工程蓝图，特别标注：材质（如45号钢、铝合金等）、结构类型（轴/齿轮/支架等）、主要尺寸、数量、精度要求、表面处理要求。") -> dict:
         """
         使用 mmx CLI 进行图片识别
 
@@ -176,3 +176,15 @@ class AIManufacturing:
 
 # 全局实例
 ai_manufacturing = AIManufacturing()
+
+
+# ── Workflow runner wrapper ─────────────────────────────────────────────────
+# Allows YAML workflow to call vision() as a module-level async function.
+# Usage in YAML: module=app.modules.ai_module, method=vision
+
+async def vision(image_base64: str, prompt: str = "") -> dict:
+    """
+    Module-level wrapper for AIManufacturing.vision().
+    Used by workflow_runner since YAML can't navigate instance methods.
+    """
+    return await ai_manufacturing.vision(image_base64, prompt)

@@ -496,211 +496,78 @@ class ManufacturingLINEBot:
         }
 
     async def process_blueprint_image(self, image_bytes: bytes) -> dict:
-        """对图纸图片进行结构化分析 → 6步流程输出
+        """对图纸图片进行结构化分析 → 6步流程输出（YAML Workflow 驱动）
 
-        Step 1 OCR/Vision：真实识别材料/孔/尺寸/注释
-        Step 2 Feature Extraction：孔数量/板厚/对称性/结构类型
-        Step 3 Process Classification：铸造/CNC/板金判断
-        Step 4 Similarity Search：KB结果（如无数据则说明）
-        Step 5 Rule Engine：工时估算
-        Step 6 LLM Output：报价/日文文档/风险提示
-
-        Args:
-            image_bytes: 图片二进制数据
-
-        Returns:
-            LINE 消息 dict（6步结构化输出）
+        完整流水线：文件 → OCR识别 → 结构化解析 → 返回参数
         """
-        from app.modules.ai_module import ai_manufacturing
         import base64
 
-        steps_output = []  # 存储各步骤结果
-
-        # ── Step 1: OCR/Vision ─────────────────────────────────────────────
+        # ── 1. 执行 YAML Workflow ────────────────────────────────
         image_b64 = base64.b64encode(image_bytes).decode()
-        vision_dict = await ai_manufacturing.vision(
-            image_b64,
-            "请分析这张制造业图纸，以JSON格式输出以下结构化参数（只输出JSON，不要其他内容）：\n"
-            "{\"材质\": \"...\", \"数量\": \"...\", \"主要尺寸\": \"...\", \"重量kg\": \"...\", \"板厚mm\": \"...\", \"孔数量\": \"...\", \"对称性\": \"...\", \"结构类型\": \"...\", \"工艺要求\": \"...\", \"公差要求\": \"...\", \"表面处理\": \"...\"}\n"
-            "如果某项无法从图纸判断，填\"未标注\"。"
-        )
-        # 检查是否有错误
-        if not vision_dict or isinstance(vision_dict, str):
-            return {
-                "type": "text",
-                "text": "⚠️ 图纸识别服务暂时不可用，请稍后再试，或联系客服手动报价。",
-                "quickReply": {
-                    "items": [
-                        {"type": "action", "action": {"type": "message", "label": "查询报价", "text": "我想查询报价"}},
-                        {"type": "action", "action": {"type": "message", "label": "联系客服", "text": "人工报价"}},
-                    ]
-                }
-            }
-        if "error" in vision_dict:
-            return {
-                "type": "text",
-                "text": f"⚠️ 图纸识别出错：{vision_dict['error']}，请稍后再试，或联系客服手动报价。",
-                "quickReply": {
-                    "items": [
-                        {"type": "action", "action": {"type": "message", "label": "查询报价", "text": "我想查询报价"}},
-                        {"type": "action", "action": {"type": "message", "label": "联系客服", "text": "人工报价"}},
-                    ]
-                }
-            }
 
-        # 解析 JSON 内容
-        import json
-        import re
-        vision_content = vision_dict.get("content", "{}")
-        # 尝试从 content 中提取 JSON 对象
-        json_match = re.search(r'\{[^{}]*\}', vision_content)
-        if json_match:
-            try:
-                struct_data = json.loads(json_match.group())
-            except json.JSONDecodeError:
-                struct_data = {}
-        else:
-            struct_data = {}
-
-        step1_text = f"[Step 1] OCR/Vision 识别结果：\n{vision_content}"
-        steps_output.append({"step": 1, "name": "OCR/Vision", "content": vision_content})
-        print(f"[DEBUG] Step 1 - Vision: {vision_content[:200]}...")
-
-        # ── Step 2: Feature Extraction ─────────────────────────────────
-        # 从结构化 JSON 数据提取特征
-        features = {
-            "material": struct_data.get("材质", "未知"),
-            "quantity": int(struct_data.get("数量", 1)) if struct_data.get("数量", "1").isdigit() else 1,
-            "dimensions": struct_data.get("主要尺寸", "未知"),
-            "weight_kg": float(struct_data.get("重量kg", 1.0)) if struct_data.get("重量kg", "1.0").replace(".", "").isdigit() else 1.0,
-            "tolerance": struct_data.get("公差要求", "普通"),
-            "surface": struct_data.get("表面处理", "无特殊要求"),
-            "thickness": struct_data.get("板厚mm", "未知"),
-            "hole_count": int(struct_data.get("孔数量", 0)) if struct_data.get("孔数量", "0").isdigit() else 0,
-            "symmetry": struct_data.get("对称性", "未知"),
-            "structure_type": struct_data.get("结构类型", "未知"),
-        }
-
-        step2_text = (
-            f"[Step 2] Feature Extraction 特征提取：\n"
-            f"- 材质：{features['material']}\n"
-            f"- 数量：{features['quantity']}件\n"
-            f"- 尺寸：{features['dimensions']}\n"
-            f"- 重量：{features['weight_kg']}kg\n"
-            f"- 板厚：{features['thickness']}\n"
-            f"- 孔数：{features['hole_count']}个\n"
-            f"- 对称性：{features['symmetry']}\n"
-            f"- 结构类型：{features['structure_type']}"
-        )
-        steps_output.append({"step": 2, "name": "Feature Extraction", "content": features})
-        print(f"[DEBUG] Step 2 - Features: {features}")
-
-        # ── Step 3: Process Classification ────────────────────────────
-        # 判断加工工艺类型：铸造/CNC/板金
-        process_type = self._classify_process(features, vision_content)
-        step3_text = f"[Step 3] Process Classification 工艺判断：\n{process_type}"
-        steps_output.append({"step": 3, "name": "Process Classification", "content": process_type})
-        print(f"[DEBUG] Step 3 - Process: {process_type}")
-
-        # ── Step 4: Similarity Search ────────────────────────────────
-        kb_results = []
         try:
-            from app.modules.kb_module import get_kb
-            kb = get_kb()
-            kb_results = kb.vector_search(vision_content, top_k=3)
-            print(f"[DEBUG] Step 4 - KB matched {len(kb_results)} entries")
-        except Exception as kb_err:
-            print(f"[WARN] KB search failed: {kb_err}")
+            from app.workflow.workflow_runner import WorkflowRunner
 
-        if kb_results:
-            kb_text = f"[Step 4] Similarity Search 知识库匹配：\n找到 {len(kb_results)} 条相似记录：\n"
-            for i, r in enumerate(kb_results[:3], 1):
-                kb_text += f"{i}. {r['title']} (相似度: {r['score']:.2f})\n"
-        else:
-            kb_text = "[Step 4] Similarity Search 知识库匹配：\n⚠️ 未匹配到相关知识库内容（KB为空或相似度不足）"
-
-        steps_output.append({"step": 4, "name": "Similarity Search", "content": kb_results})
-        print(f"[DEBUG] Step 4 - KB: {kb_text[:200]}...")
-
-        # ── Step 5: Rule Engine 工时估算 ─────────────────────────
-        # 只有 KB 有真实匹配数据时才进行报价
-        has_kb_data = bool(kb_results)
-
-        if has_kb_data:
-            # KB 有数据 → 进行工时估算
-            material = features.get("material", "SUS304")
-            quantity = features.get("quantity", 1)
-            weight_kg = features.get("weight_kg", 1.0)
-            process_category = process_type
-
-            # 基于规则的工时估算
-            hours_estimate = self._estimate_hours(
-                material=material,
-                quantity=quantity,
-                weight_kg=weight_kg,
-                process_type=process_category,
-                features=features,
+            runner = WorkflowRunner.from_yaml("manufacturing-blueprint")
+            workflow_result = await runner.execute(
+                image_b64=image_b64,
             )
-            step5_text = f"[Step 5] Rule Engine 工时估算：\n{hours_estimate}"
-            steps_output.append({"step": 5, "name": "Rule Engine", "content": hours_estimate})
-            print(f"[DEBUG] Step 5 - Hours: {hours_estimate}")
-        else:
-            # KB 为空 → 跳过 Step 5
-            hours_estimate = None
-            step5_text = "[Step 5] Rule Engine 工时估算：\n⚠️ 跳过（KB无匹配数据）"
-            steps_output.append({"step": 5, "name": "Rule Engine", "content": "跳过"})
-            print(f"[DEBUG] Step 5 - Skipped (KB empty)")
-
-        # ── Step 6: LLM Output ───────────────────────────────────
-        # 只有 KB 有真实匹配数据时才调用报价 API
-        if has_kb_data:
-            # 调用报价 API
-            quote_data = None
-            try:
-                async with httpx.AsyncClient(timeout=15.0) as client:
-                    response = await client.post(
-                        f"{self._base_url}/api/quote/generate",
-                        json={
-                            "material": features.get("material", "SUS304"),
-                            "quantity": features.get("quantity", 1),
-                            "weight_kg": features.get("weight_kg", 1.0),
-                            "process_category": process_type,
-                        },
-                    )
-                    if response.status_code == 200:
-                        quote_data = response.json()
-            except Exception as q_err:
-                print(f"[WARN] Quote API failed: {q_err}")
-
-            # 构建最终回复
-            step6_content = self._build_step6_output(
-                quote_data=quote_data,
-                process_type=process_type,
-                kb_results=kb_results,
-            )
-            steps_output.append({"step": 6, "name": "LLM Output", "content": step6_content})
-            print(f"[DEBUG] Step 6 - Quote ready")
-        else:
-            # KB 为空 → 跳过 Step 6，提示联系客服
-            step6_content = {
-                "text": "请联系客服获取准确报价",
-                "has_quote": False,
+        except Exception as wf_err:
+            print(f"[ERROR] Workflow execution failed: {wf_err}")
+            return {
+                "type": "text",
+                "text": "⚠️ 图纸分析服务暂时不可用，请稍后再试，或联系客服手动报价。",
+                "quickReply": {
+                    "items": [
+                        {"type": "action", "action": {"type": "message", "label": "查询报价", "text": "我想查询报价"}},
+                        {"type": "action", "action": {"type": "message", "label": "联系客服", "text": "人工报价"}},
+                    ]
+                }
             }
-            steps_output.append({"step": 6, "name": "LLM Output", "content": step6_content})
-            quote_data = None
-            print(f"[DEBUG] Step 6 - Skipped (KB empty)")
 
-        # ── 组合 6 步输出 ─────────────────────────────────────────
-        return self._build_6step_response(
-            steps_output=steps_output,
-            vision_result=vision_content,
-            features=features,
-            process_type=process_type,
-            kb_text=kb_text,
-            hours_estimate=hours_estimate,
-            quote_data=quote_data,
-            has_kb_data=has_kb_data,
-        )
+        # ── 2. 渲染 LINE 消息 ─────────────────────────────────
+        msg = runner.render_line_message(workflow_result)
+
+        # ── 3. 补充 QuickReply（根据执行结果决定按钮）────────────
+        step_5 = workflow_result.step_results.get("step_5_rule_engine")
+        step_6 = workflow_result.step_results.get("step_6_quote")
+        kb_gate_passed = workflow_result.step_results.get("step_4_kb_search") and \
+            workflow_result.step_results["step_4_kb_search"].gate and \
+            workflow_result.step_results["step_4_kb_search"].gate.passed
+
+        # 已有 quickReply（来自 render_line_message 的 error case）
+        if "quickReply" in msg:
+            return msg
+
+        # Step 6 成功执行 → 报价到手，提供确认/修改按钮
+        if step_6 and step_6.executed and step_6.output:
+            msg["quickReply"] = {
+                "items": [
+                    {"type": "action", "action": {"type": "message", "label": "📝 确认报价", "text": "确认报价"}},
+                    {"type": "action", "action": {"type": "message", "label": "🔧 修改参数", "text": "修改参数"}},
+                    {"type": "action", "action": {"type": "message", "label": "📞 联系客服", "text": "人工报价"}},
+                ]
+            }
+            return msg
+
+        # KB Gate 失败（Step 5/6 跳过）→ 引导联系客服
+        if step_5 and step_5.skipped:
+            msg["quickReply"] = {
+                "items": [
+                    {"type": "action", "action": {"type": "message", "label": "📞 联系客服", "text": "人工报价"}},
+                    {"type": "action", "action": {"type": "message", "label": "📋 重新上传", "text": "上传图纸"}},
+                ]
+            }
+            return msg
+
+        # 通用 fallback
+        msg["quickReply"] = {
+            "items": [
+                {"type": "action", "action": {"type": "message", "label": "查询报价", "text": "我想查询报价"}},
+                {"type": "action", "action": {"type": "message", "label": "联系客服", "text": "人工报价"}},
+            ]
+        }
+        return msg
 
     def _build_blueprint_response(
         self,

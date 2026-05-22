@@ -40,6 +40,11 @@ class SearchRequest(BaseModel):
     top_k: int = 5
 
 
+class ParseTextRequest(BaseModel):
+    """纯文本解析请求（已有OCR结果时直接传文字）"""
+    text: str
+
+
 # 硬编码示例（保留作为 fallback）
 BLUEPRINT_SAMPLE = {
     "material": "SUS304 Stainless Steel",
@@ -219,6 +224,113 @@ async def kb_count():
     """知识库条目数量"""
     kb = get_kb()
     return {"count": kb.count(), "service": "knowledge_base"}
+
+
+@router.post("/parse")
+async def parse_blueprint(req: ParseTextRequest):
+    """
+    蓝图文本 → 结构化参数解析
+
+    输入 OCR 原始文字，输出 BlueprintSpec 结构化数据。
+    用于：上传文件后解析结构化参数 → 报价系统联动
+    """
+    from app.modules.blueprint_parser import BlueprintParser
+
+    parser = BlueprintParser()
+    spec = parser.parse(req.text)
+
+    return {
+        "material": spec.material,
+        "quantity": spec.quantity,
+        "dimensions": spec.dimensions,
+        "tolerance": spec.tolerance,
+        "surface": spec.surface,
+        "weight_kg": spec.weight_kg,
+        "process_type": spec.process_type,
+        "raw_text_length": len(spec.raw_text),
+    }
+
+
+@router.post("/upload-and-parse")
+async def upload_and_parse_blueprint(file: UploadFile = File(...)):
+    """
+    上传图纸 → OCR → 解析结构化参数 → 返回完整结果
+
+    完整流水线：文件 → OCR识别 → 结构化解析 → 返回参数
+    """
+    file_bytes = await file.read()
+    file_ext = file.filename.split(".")[-1].lower() if file.filename else ""
+
+    # ── 1. 提取文字（OCR 或直接读取）───────────────────────
+    ocr_result_text = ""
+    ocr_confidence = 0.0
+    ocr_language = "unknown"
+    ocr_status = "skipped"
+
+    try:
+        from app.modules.ocr_module import ocr_image, ocr_pdf_page, check_ocr_available
+
+        if file_ext in ("png", "jpg", "jpeg", "bmp", "tiff", "tif", "gif"):
+            # 图片 → OCR
+            if check_ocr_available():
+                ocr_result = ocr_image(image_bytes=file_bytes, language="en")
+                ocr_result_text = ocr_result.text
+                ocr_confidence = ocr_result.confidence
+                ocr_language = ocr_result.language
+                ocr_status = "success"
+            else:
+                ocr_status = "unavailable"
+
+        elif file_ext == "pdf":
+            # PDF → OCR
+            if check_ocr_available():
+                ocr_result = ocr_pdf_page(file_bytes, page_number=0, dpi=200, language="en")
+                ocr_result_text = ocr_result.text
+                ocr_confidence = ocr_result.confidence
+                ocr_language = ocr_result.language
+                ocr_status = "success"
+            else:
+                ocr_status = "unavailable"
+
+        else:
+            # 文本文件 → 直接读取内容
+            try:
+                ocr_result_text = file_bytes.decode("utf-8")
+                ocr_status = "text_file"
+                ocr_confidence = 1.0
+            except Exception:
+                ocr_result_text = ""
+                ocr_status = "decode_error"
+
+    except Exception as ocr_err:
+        logger.warning(f"OCR failed: {ocr_err}")
+        ocr_status = f"error: {ocr_err}"
+
+    # ── 2. 结构化解析 ──────────────────────────────────
+    if ocr_result_text:
+        from app.modules.blueprint_parser import BlueprintParser
+        parser = BlueprintParser()
+        spec = parser.parse(ocr_result_text)
+    else:
+        from app.modules.blueprint_parser import BlueprintSpec
+        spec = BlueprintSpec(raw_text=ocr_result_text)
+
+    return {
+        "filename": file.filename,
+        "ocr_status": ocr_status,
+        "ocr_confidence": ocr_confidence,
+        "ocr_language": ocr_language,
+        "extracted_text": ocr_result_text[:500] if ocr_result_text else "",
+        "spec": {
+            "material": spec.material,
+            "quantity": spec.quantity,
+            "dimensions": spec.dimensions,
+            "tolerance": spec.tolerance,
+            "surface": spec.surface,
+            "weight_kg": spec.weight_kg,
+            "process_type": spec.process_type,
+        }
+    }
 
 
 async def _rule_match(question: str) -> str:

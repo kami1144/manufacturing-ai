@@ -10,11 +10,13 @@ OCR 模块 - 独立可复用
 """
 
 from typing import Optional, Tuple
+from dataclasses import dataclass
 import io
 import tempfile
 import os
 
 
+@dataclass
 class OCRResult:
     def __init__(self, text: str, confidence: float = 0.0, language: str = "auto"):
         self.text = text
@@ -29,12 +31,44 @@ class OCRResult:
         }
 
 
+# ── 全局 OCR 单例（预加载避免每次初始化卡死）─────────────────────────
+
+_ocr_instance = None
+_ocr_lang = "en"
+
+
+def _get_ocr(language: str = "en") -> "PaddleOCR":
+    """获取或创建全局 OCR 实例"""
+    global _ocr_instance, _ocr_lang
+    if _ocr_instance is None or _ocr_lang != language:
+        from paddleocr import PaddleOCR
+        # PaddleOCR 3.5+ 参数：lang, use_textline_orientation
+        _ocr_instance = PaddleOCR(lang=language)
+        _ocr_lang = language
+    return _ocr_instance
+
+
+def _warmup_ocr():
+    """预热 OCR（uvicorn worker 启动时调用一次，避免首次请求卡死）"""
+    try:
+        import logging
+        logging.getLogger("paddleocr").setLevel(logging.WARNING)
+        _get_ocr()
+        print("[OCR] PaddleOCR pre-warmed")
+    except Exception as e:
+        print(f"[OCR] Warmup failed: {e}")
+
+
+# 模块加载时跳过预热（uvicorn worker 启动时不要卡住）
+# 改为首次使用时懒加载
+
+
 def check_ocr_available() -> bool:
     """检查 OCR 是否可用"""
     try:
-        from paddleocr import PaddleOCR
+        _get_ocr()
         return True
-    except ImportError:
+    except (ImportError, Exception):
         return False
 
 
@@ -90,17 +124,7 @@ def ocr_image(
     Raises:
         RuntimeError: OCR 库不可用时
     """
-    if not check_ocr_available():
-        raise RuntimeError(
-            "PaddleOCR not available. Install with: pip install paddlepaddle paddleocr"
-        )
-
-    from paddleocr import PaddleOCR
-
-    ocr = PaddleOCR(
-        lang=language,
-        use_angle_cls=True
-    )
+    ocr = _get_ocr(language)
 
     # 处理 CAD 模式
     processed_bytes = image_bytes

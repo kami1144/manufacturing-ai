@@ -100,7 +100,8 @@ class KnowledgeBase:
             self.embed_all()
 
         if not self._embeddings:
-            return []
+            # Embedding failed (API key missing etc.) — fall back to keyword search
+            return self.search(query, top_k, category)
 
         query_emb = embed_text(query)
         texts = []
