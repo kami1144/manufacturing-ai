@@ -17,12 +17,13 @@ from app.api import blueprint, health, quote, line_api, realestate
 
 app = FastAPI(title="Manufacturing AI API", version="0.1.0")
 
+ALLOWED_ORIGINS = os.getenv("CORS_ORIGINS", "").split(",") if os.getenv("CORS_ORIGINS") else ["https://your-domain.com"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("CORS_ORIGINS", "*").split(","),
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
 )
 
 app.include_router(health.router, prefix="/api")

@@ -1,1 +1,16 @@
 backend/.env
+backend/__pycache__/
+backend/*.pyc
+backend/.venv/
+node_modules/
+dist/
+build/
+*.egg-info/
+.env
+.env.local
+*.log
+.DS_Store
+*.pot
+*.pyc
+__pycache__/
+

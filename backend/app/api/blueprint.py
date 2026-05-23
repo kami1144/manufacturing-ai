@@ -74,12 +74,33 @@ UPLOAD_DIR = Path.home() / "manufacturing-ai" / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
+# 允许的 MIME 类型和扩展名
+ALLOWED_MIME_TYPES = {
+    "image/jpeg", "image/png", "image/gif", "image/webp",
+    "application/pdf",
+    "image/tiff", "image/bmp",
+}
+ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "gif", "webp", "pdf", "tiff", "tif", "bmp"}
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+
+
 @router.post("/upload")
 async def upload_blueprint(file: UploadFile = File(...)):
     """上传图纸/文档 → 保存本地 + OCR解析 →存入知识库"""
-    file_id = str(uuid.uuid4())
-    file_bytes = await file.read()
+    # ── 0. 文件安全验证 ─────────────────────────────────
     file_ext = file.filename.split(".")[-1].lower() if file.filename else ""
+    if file_ext not in ALLOWED_EXTENSIONS:
+        return {"error": f"不支持的文件类型: .{file_ext}，仅支持: {', '.join(sorted(ALLOWED_EXTENSIONS))}"}, 400
+
+    file_bytes = await file.read()
+    if len(file_bytes) > MAX_FILE_SIZE:
+        return {"error": f"文件大小超过限制({MAX_FILE_SIZE // 1024 // 1024}MB)"}, 400
+
+    # 验证实际 MIME 类型
+    if file.content_type and file.content_type not in ALLOWED_MIME_TYPES:
+        return {"error": f"不支持的MIME类型: {file.content_type}"}, 400
+
+    file_id = str(uuid.uuid4())
 
     # ── 1. 保存原始文件到本地 ──────────────────────────────
     saved_path = None
