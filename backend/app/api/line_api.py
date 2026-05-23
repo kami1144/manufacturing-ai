@@ -8,6 +8,7 @@ LINE API - FastAPI 路由
 """
 
 import os
+import json
 from fastapi import APIRouter, Request, HTTPException, Response
 from typing import Optional
 
@@ -31,44 +32,72 @@ async def line_webhook(request: Request):
     """LINE Webhook 端点
 
     处理 LINE 平台发送的 Webhook 事件：
-    - 文本消息
-    - 图片消息（图纸）
-    - 其他消息类型
+    - 制造业 Bot（LINE_CHANNEL_SECRET）
+    - 不动产 Bot（REALESTATE_LINE_CHANNEL_SECRET）
     """
     # 获取请求体
     body = await request.body()
-    body_json = await request.json()
+    body_json = json.loads(body) if body else {}
 
     # 获取签名
     signature = request.headers.get("X-Line-Signature", "")
 
-    # 验证签名
+    # 根据签名判断是哪个 Bot
+    import hmac, hashlib
+    manufacturing_secret = os.getenv("LINE_CHANNEL_SECRET", "")
+    realestate_secret = os.getenv("REALESTATE_LINE_CHANNEL_SECRET", "")
+
+    bot_type = None
+    if manufacturing_secret and signature:
+        key = manufacturing_secret.encode()
+        expected = hmac.new(key, body, hashlib.sha256).digest()
+        if hmac.compare_digest(expected, bytes.fromhex(signature)):
+            bot_type = "manufacturing"
+
+    if not bot_type and realestate_secret and signature:
+        key = realestate_secret.encode()
+        expected = hmac.new(key, body, hashlib.sha256).digest()
+        if hmac.compare_digest(expected, bytes.fromhex(signature)):
+            bot_type = "realestate"
+
+    # 开发环境跳过签名验证
+    if not signature or bot_type is None:
+        if line_config.is_development:
+            # 开发环境：检查 events 判断类型
+            events = body_json.get("events", [])
+            if events and not bot_type:
+                bot_type = "manufacturing"  # default
+        else:
+            raise HTTPException(status_code=401, detail="Invalid signature")
+
+    # ── 路由到对应 Bot ───────────────────────────────────
+    if bot_type == "realestate":
+        return await _handle_realestate_webhook(body, body_json, signature)
+    else:
+        return await _handle_manufacturing_webhook(body, body_json, signature)
+
+
+async def _handle_manufacturing_webhook(body: bytes, body_json: dict, signature: str):
+    """处理制造业 Bot 事件"""
     webhook_handler = LINEWebhookHandler()
     if signature and not webhook_handler.verify_signature(body, signature):
-        print("[WARN] Invalid LINE signature")
-        # 开发环境下跳过验证
+        print("[WARN] Invalid LINE signature (manufacturing)")
         if not line_config.is_development:
             raise HTTPException(status_code=401, detail="Invalid signature")
 
-    # 解析事件
     events = webhook_handler.parse_events(body_json)
     if not events:
         return {"status": "ok", "message": "No events"}
 
-    # 处理每个事件
     results = []
     for event in events:
         event_type = webhook_handler.get_event_type(event)
-
-        # 忽略非消息事件
         if event_type != "message":
             results.append({"type": event_type, "handled": False})
             continue
 
-        # 提取消息信息
         user_id = webhook_handler.extract_user_id(event)
         reply_token = webhook_handler.get_reply_token(event)
-
         if not user_id or not reply_token:
             results.append({"type": "message", "handled": False})
             continue
@@ -78,10 +107,7 @@ async def line_webhook(request: Request):
         if message_type == "text":
             text = webhook_handler.extract_message_text(event)
             if text:
-                # 处理文本消息
                 response = await line_bot.process_message(user_id, text, reply_token)
-
-                # 统一处理返回值：dict → 直接发，str → 包装成 text 消息
                 if isinstance(response, dict):
                     await line_bot.reply_message(reply_token, [response])
                 else:
@@ -89,58 +115,52 @@ async def line_webhook(request: Request):
                         reply_token,
                         [{"type": "text", "text": str(response)}],
                     )
-
-                results.append({
-                    "type": "message",
-                    "message_type": "text",
-                    "user_id": user_id,
-                    "handled": True,
-                })
+                results.append({"type": "message", "message_type": "text", "user_id": user_id, "handled": True})
 
         elif message_type == "image":
             message_id = webhook_handler.extract_message_id(event)
             if message_id:
-                # 下载图片 → OCR → 提取材质 → 报价 → Flex Message 回复
                 try:
                     image_data = await line_bot.download_line_image(message_id)
-
-                    # process_blueprint_image 返回 LINE 消息 dict（直接发送）
                     msg = await line_bot.process_blueprint_image(image_data)
                     await line_bot.reply_message(reply_token, [msg])
-
-                    results.append({
-                        "type": "message",
-                        "message_type": "image",
-                        "user_id": user_id,
-                        "handled": True,
-                    })
+                    results.append({"type": "message", "message_type": "image", "user_id": user_id, "handled": True})
                 except Exception as e:
                     print(f"[ERROR] Image quote error: {e}")
-                    await line_bot.reply_message(
-                        reply_token,
-                        [{"type": "text", "text": f"⚠️ 图片处理失败，请稍后再试。"}]
-                    )
-                    results.append({
-                        "type": "message",
-                        "message_type": "image",
-                        "handled": False,
-                        "error": str(e),
-                    })
-            else:
-                results.append({
-                    "type": "message",
-                    "message_type": "image",
-                    "handled": False,
-                })
-
+                    await line_bot.reply_message(reply_token, [{"type": "text", "text": "⚠️ 图片处理失败，请稍后再试。"}])
+                    results.append({"type": "message", "message_type": "image", "handled": False, "error": str(e)})
         else:
-            results.append({
-                "type": "message",
-                "message_type": message_type,
-                "handled": False,
-            })
+            results.append({"type": "message", "message_type": message_type, "handled": False})
 
     return {"status": "ok", "results": results}
+
+
+async def _handle_realestate_webhook(body: bytes, body_json: dict, signature: str):
+    """处理不动产 Bot 事件"""
+    from app.modules.realestate.line_module import handle_line_event, reply_message as realestate_reply
+
+    events = body_json.get("events", [])
+    for event_data in events:
+        try:
+            class Event:
+                def __init__(self, data):
+                    self.type = data.get("type")
+                    self.reply_token = data.get("replyToken")
+                    self.source = data.get("source", {})
+                    if data.get("message"):
+                        self.message = type("Message", (), data.get("message", {}))()
+
+            event = Event(event_data)
+            response_text = handle_line_event(event)
+            if response_text and event.reply_token:
+                try:
+                    realestate_reply(event.reply_token, response_text)
+                except Exception as e:
+                    print(f"[WARN] Realestate reply failed: {e}")
+        except Exception as e:
+            print(f"[WARN] Realestate event error: {e}")
+
+    return {"status": "ok"}
 
 
 @router.get("/health")
