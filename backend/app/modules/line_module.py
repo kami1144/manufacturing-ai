@@ -1090,14 +1090,33 @@ class ManufacturingLINEBot:
 
 *实际价格根据图纸复杂度确定"""
 
-    def _format_knowledge_reply(self, results: List[dict]) -> str:
-        """格式化知识库回复"""
-        lines = ["📚 搜索结果：\n"]
+    def _extract_section(self, content: str, keyword: str, context_chars: int = 600) -> str:
+        """提取包含关键词的段落块（用于精准回答）"""
+        idx = content.find(keyword)
+        if idx == -1:
+            return content[:400]
+        start = max(0, idx - 100)
+        end = min(len(content), idx + context_chars)
+        return content[start:end]
+
+    def _format_knowledge_reply(self, results: List[dict], user_query: str = "") -> str:
+        """格式化知识库回复，精准提取相关内容"""
+        if not results:
+            return "📚 未找到相关内容"
+
+        lines = []
         for i, r in enumerate(results, 1):
             title = r.get("title", "N/A")
-            content = r.get("content", "")[:100]
-            lines.append(f"{i}. {title}\n{content}...")
-        return "\n".join(lines)
+            content = r.get("content", "")
+
+            # 精准提取「検査対象製品」「対象製品」等段落
+            snippet = self._extract_section(content, "検査対象製品|対象製品|品質検査", context_chars=500)
+
+            lines.append(f"📋 {title}\n{snippet}\n")
+            if i >= 2:
+                break
+
+        return "\n".join(lines) if lines else "📚 未找到相关内容"
 
     def create_quick_reply(self) -> dict:
         """创建 Quick Reply 消息"""
