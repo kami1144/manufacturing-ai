@@ -235,11 +235,50 @@ _kb: Optional[KnowledgeBase] = None
 
 
 def get_kb() -> KnowledgeBase:
+    """获取全局知识库，先尝试从持久化加载，失败则回退到内存"""
     global _kb
     if _kb is None:
         _kb = KnowledgeBase()
-        load_mock_data()  # 启动时自动加载 mock 数据
+        _load_from_persistence(_kb)  # 尝试从 SQLite 加载
+        if _kb.count() == 0:
+            load_mock_data()  # 首次启动，加载 mock 数据
+            _save_to_persistence(_kb)  # 保存到持久化
     return _kb
+
+
+def _load_from_persistence(kb: KnowledgeBase) -> int:
+    """从 SQLite 加载已保存的知识条目"""
+    try:
+        from app.workflow.kb_persistence import get_persisted_kb
+        persisted = get_persisted_kb()
+        entries = persisted.load_all()
+
+        for pe in entries:
+            kb._entries[pe.id] = KBEntry(
+                id=pe.id,
+                title=pe.title,
+                content=pe.content,
+                category=pe.category,
+                keywords=pe.keywords,
+                source=pe.source
+            )
+        return len(entries)
+    except Exception as e:
+        print(f"[WARN] KB persistence load failed: {e}")
+        return 0
+
+
+def _save_to_persistence(kb: KnowledgeBase) -> int:
+    """将所有 KB 条目保存到 SQLite"""
+    try:
+        from app.workflow.kb_persistence import get_persisted_kb
+        persisted = get_persisted_kb()
+        for entry in kb._entries.values():
+            persisted.save_entry(entry)
+        return kb.count()
+    except Exception as e:
+        print(f"[WARN] KB persistence save failed: {e}")
+        return 0
 
 
 def load_mock_data():
