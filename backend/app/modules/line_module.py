@@ -938,7 +938,7 @@ class ManufacturingLINEBot(LINEBot):
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.post(
-                    f"{self._base_url}/api/blueprint/search",
+                    f"{self._base_url}/api/blueprint/agentic-search",
                     json={"query": text, "top_k": 3},
                 )
                 if response.status_code == 200:
@@ -1030,7 +1030,7 @@ class ManufacturingLINEBot(LINEBot):
             # Use HTTP API (reliable, already tested) instead of direct function call
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(
-                    "http://127.0.0.1:8000/api/blueprint/search",
+                    "http://127.0.0.1:8000/api/blueprint/agentic-search",
                     json={"query": text, "top_k": 5},
                 )
                 data = resp.json()
