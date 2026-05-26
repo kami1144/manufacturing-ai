@@ -21,6 +21,7 @@ import re
 from typing import Any, Optional, List
 import httpx
 
+from app.bot_provider import LINEBot
 from app.line_config import line_config
 from app.modules.intent_module import intent_classifier
 from app.modules.blueprint_parser import BlueprintParser
@@ -185,7 +186,7 @@ user_quote_state = UserQuoteState()
 
 # ── Manufacturing LINE Bot ────────────────────────────
 
-class ManufacturingLINEBot:
+class ManufacturingLINEBot(LINEBot):
     """制造业 LINE Bot
 
     处理：
@@ -193,55 +194,26 @@ class ManufacturingLINEBot:
     - 报价咨询（调用报价 API）
     - 知识库搜索（RAG）
     - 工艺类型查询
+
+    继承 LINEBot，复用 send_message/download_media 等基础设施，
+    添加制造业特定业务逻辑方法。
     """
 
     def __init__(self):
+        super().__init__()
         self.webhook_handler = LINEWebhookHandler()
         self._base_url = os.getenv("API_BASE_URL", "http://localhost:8000")
         self._state = user_quote_state  # 引用全局状态管理器
 
+    # 适配：download_line_image 是 download_media 的别名
     async def download_line_image(self, message_id: str) -> bytes:
-        """从 LINE 服务器下载图片
+        """从 LINE 服务器下载图片（适配方法）"""
+        return await self.download_media(message_id)
 
-        Args:
-            message_id: LINE message ID
-
-        Returns:
-            Image binary data
-        """
-        if not line_config.LINE_CHANNEL_ACCESS_TOKEN:
-            raise ValueError("LINE_CHANNEL_ACCESS_TOKEN not configured")
-
-        url = f"https://api-data.line.me/v2/bot/message/{message_id}/content"
-
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(
-                    url,
-                    headers={
-                        "Authorization": f"Bearer {line_config.LINE_CHANNEL_ACCESS_TOKEN}",
-                    },
-                )
-                response.raise_for_status()
-                return response.content
-        except httpx.TimeoutException:
-            raise TimeoutError("LINE image download timed out")
-        except httpx.HTTPStatusError as e:
-            raise RuntimeError(f"LINE image download HTTP error: {e}")
-        except Exception as e:
-            raise RuntimeError(f"LINE image download error: {str(e)}")
-
+    # 覆盖：使用原有实现（支持多消息列表）
     async def reply_message(self, reply_token: str, messages: List[dict]) -> bool:
-        """回复 LINE 用户消息
-
-        Args:
-            reply_token: LINE reply token
-            messages: List of message objects
-
-        Returns:
-            True if successful
-        """
-        if not line_config.LINE_CHANNEL_ACCESS_TOKEN:
+        """回复 LINE 用户消息（支持多消息）"""
+        if not self.token:
             print("[ERROR] LINE_CHANNEL_ACCESS_TOKEN not configured")
             return False
 
@@ -252,7 +224,7 @@ class ManufacturingLINEBot:
                 response = await client.post(
                     url,
                     headers={
-                        "Authorization": f"Bearer {line_config.LINE_CHANNEL_ACCESS_TOKEN}",
+                        "Authorization": f"Bearer {self.token}",
                         "Content-Type": "application/json",
                     },
                     json={
@@ -269,6 +241,28 @@ class ManufacturingLINEBot:
         except Exception as e:
             print(f"[ERROR] LINE reply error: {str(e)}")
             return False
+
+    # 适配：format_flex_message -> create_quote_flex_message
+    def format_flex_message(self, data: dict) -> dict:
+        """创建 Flex Message（适配方法）"""
+        return self.create_quote_flex_message(data)
+
+    # 适配：format_quick_reply -> create_quick_reply
+    def format_quick_reply(self, options: list[str]) -> dict:
+        """创建 Quick Reply（适配方法）"""
+        if not options:
+            return self.create_quick_reply()
+        items = []
+        for opt in options[:13]:
+            items.append({
+                "type": "action",
+                "action": {"type": "message", "label": opt, "text": opt},
+            })
+        return {
+            "type": "text",
+            "text": "请选择：",
+            "quickReply": {"items": items},
+        }
 
     async def detect_scene(self, text: str) -> str:
         """检测用户意图场景（LLM + 关键词回退）
@@ -1032,13 +1026,18 @@ class ManufacturingLINEBot:
     async def _handle_knowledge(self, text: str, reply_token: str) -> str:
         """Handle knowledge base search"""
         try:
-            # Call agentic_search directly (not via HTTP) to avoid 500 error in async context
-            from app.workflow.kb_wrapper import agentic_search
-            results = agentic_search(text, top_k=5)
-            if results:
-                return self._format_knowledge_reply(results)
-            else:
-                return await self._handle_ai_fallback(text)
+            import httpx
+            # Use HTTP API (reliable, already tested) instead of direct function call
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(
+                    "http://127.0.0.1:8000/api/blueprint/search",
+                    json={"query": text, "top_k": 5},
+                )
+                data = resp.json()
+                results = data.get("results", [])
+                if results:
+                    return self._format_knowledge_reply(results)
+            return await self._handle_ai_fallback(text)
         except Exception as e:
             print(f"[ERROR] Knowledge search error: {e}")
             return "⚠️ 知识库查询失败，请稍后再试。"
