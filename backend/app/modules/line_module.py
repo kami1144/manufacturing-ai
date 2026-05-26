@@ -17,6 +17,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 from typing import Any, Optional, List
 import httpx
 
@@ -329,10 +330,8 @@ class ManufacturingLINEBot:
         return result
 
     async def _handle_quote(self, text: str, reply_token: str, user_id: str) -> str:
-        """处理报价咨询 - 分阶段需求收集"""
-        import re
-
-        # 获取当前状态
+        """Handle quote inquiries - multi-stage requirements collection"""
+        # Get current state
         state = self._state.get_state(user_id)
 
         # ── 优先处理 QuickReply 按钮回复 ──
@@ -1031,23 +1030,15 @@ class ManufacturingLINEBot:
         )
 
     async def _handle_knowledge(self, text: str, reply_token: str) -> str:
-        """处理知识库搜索"""
+        """Handle knowledge base search"""
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(
-                    f"{self._base_url}/api/blueprint/agentic-search",
-                    json={"query": text, "top_k": 5},
-                )
-                if response.status_code == 200:
-                    data = response.json()
-                    results = data.get("results", [])
-                    if results:
-                        return self._format_knowledge_reply(results)
-                    else:
-                        # KB 无结果 → 走 AI fallback
-                        return await self._handle_ai_fallback(text)
-                else:
-                    return "知识库查询失败，请稍后再试。"
+            # Call agentic_search directly (not via HTTP) to avoid 500 error in async context
+            from app.workflow.kb_wrapper import agentic_search
+            results = agentic_search(text, top_k=5)
+            if results:
+                return self._format_knowledge_reply(results)
+            else:
+                return await self._handle_ai_fallback(text)
         except Exception as e:
             print(f"[ERROR] Knowledge search error: {e}")
             return "⚠️ 知识库查询失败，请稍后再试。"
@@ -1091,13 +1082,21 @@ class ManufacturingLINEBot:
 *实际价格根据图纸复杂度确定"""
 
     def _extract_section(self, content: str, keyword: str, context_chars: int = 600) -> str:
-        """提取包含关键词的段落块（用于精准回答）"""
-        idx = content.find(keyword)
-        if idx == -1:
+        """Extract paragraph block containing keyword (for precise answers)"""
+        # Handle OR patterns (e.g. "検査対象製品|対象製品|品質検査")
+        pattern = re.compile(keyword, re.IGNORECASE)
+        match = pattern.search(content)
+        if not match:
             return content[:400]
-        start = max(0, idx - 100)
-        end = min(len(content), idx + context_chars)
-        return content[start:end]
+        # Find the nearest line boundary around the match
+        start = max(0, match.start() - 100)
+        end = min(len(content), match.end() + context_chars)
+        # Adjust to nearest line break
+        line_start = content.rfind('\n', 0, start) + 1
+        line_end = content.find('\n', end)
+        if line_end == -1:
+            line_end = len(content)
+        return content[line_start:line_end].strip()
 
     def _format_knowledge_reply(self, results: List[dict], user_query: str = "") -> str:
         """格式化知识库回复，精准提取相关内容"""

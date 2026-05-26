@@ -217,14 +217,19 @@ def agentic_search(query: str, top_k: int = 3, **kwargs) -> list:
     agent = KBToolsAgent(tree)
 
     try:
-        loop = asyncio.get_event_loop()
+        running_loop = asyncio.get_running_loop()
     except RuntimeError:
+        # No running loop — create our own
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-
-    results = loop.run_until_complete(
-        agent.retrieve(query, top_k, kwargs.get("blueprint_context"))
-    )
+        results = loop.run_until_complete(
+            agent.retrieve(query, top_k, kwargs.get("blueprint_context"))
+        )
+        loop.close()
+    else:
+        # Already inside async context — can't use run_until_complete
+        # Fall back to sync keyword search as a safe alternative
+        results = agent._fallback_keyword_search(query, top_k)
 
     # Normalize to match existing interface
     return [
