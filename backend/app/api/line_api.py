@@ -9,6 +9,7 @@ LINE API - FastAPI 路由
 
 import os
 import json
+import asyncio
 from fastapi import APIRouter, Request, HTTPException, Response
 from typing import Optional
 
@@ -97,6 +98,21 @@ async def _handle_manufacturing_webhook(body: bytes, body_json: dict, signature:
         return {"status": "ok", "message": "No events"}
 
     results = []
+
+    async def process_and_reply(user_id: str, text: str, reply_token: str):
+        """Background task: process message and reply to LINE"""
+        try:
+            response = await line_bot.process_message(user_id, text, reply_token)
+            if isinstance(response, dict):
+                await line_bot.reply_message(reply_token, [response])
+            else:
+                await line_bot.reply_message(
+                    reply_token,
+                    [{"type": "text", "text": str(response)}],
+                )
+        except Exception as e:
+            print(f"[ERROR] Background reply failed: {e}")
+
     for event in events:
         event_type = webhook_handler.get_event_type(event)
         if event_type != "message":
@@ -114,15 +130,9 @@ async def _handle_manufacturing_webhook(body: bytes, body_json: dict, signature:
         if message_type == "text":
             text = webhook_handler.extract_message_text(event)
             if text:
-                response = await line_bot.process_message(user_id, text, reply_token)
-                if isinstance(response, dict):
-                    await line_bot.reply_message(reply_token, [response])
-                else:
-                    await line_bot.reply_message(
-                        reply_token,
-                        [{"type": "text", "text": str(response)}],
-                    )
-                results.append({"type": "message", "message_type": "text", "user_id": user_id, "handled": True})
+                # Fire-and-forget: respond to LINE immediately, process in background
+                asyncio.create_task(process_and_reply(user_id, text, reply_token))
+                results.append({"type": "message", "message_type": "text", "user_id": user_id, "handled": True, "async": True})
 
         elif message_type == "image":
             message_id = webhook_handler.extract_message_id(event)
