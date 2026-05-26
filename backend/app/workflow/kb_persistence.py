@@ -31,7 +31,7 @@ from app.modules.kb_module import KBEntry
 
 # 数据库路径（在项目根目录）
 DB_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.file__))),
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     "kb.sqlite"
 )
 
