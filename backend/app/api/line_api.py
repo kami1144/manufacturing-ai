@@ -49,16 +49,23 @@ async def line_webhook(request: Request):
 
     bot_type = None
     if manufacturing_secret and signature:
-        key = manufacturing_secret.encode()
-        expected = hmac.new(key, body, hashlib.sha256).digest()
-        if hmac.compare_digest(expected, bytes.fromhex(signature)):
-            bot_type = "manufacturing"
+        try:
+            key = manufacturing_secret.encode()
+            expected = hmac.new(key, body, hashlib.sha256).digest()
+            if hmac.compare_digest(expected, bytes.fromhex(signature)):
+                bot_type = "manufacturing"
+        except ValueError:
+            # Invalid hex signature
+            pass
 
     if not bot_type and realestate_secret and signature:
-        key = realestate_secret.encode()
-        expected = hmac.new(key, body, hashlib.sha256).digest()
-        if hmac.compare_digest(expected, bytes.fromhex(signature)):
-            bot_type = "realestate"
+        try:
+            key = realestate_secret.encode()
+            expected = hmac.new(key, body, hashlib.sha256).digest()
+            if hmac.compare_digest(expected, bytes.fromhex(signature)):
+                bot_type = "realestate"
+        except ValueError:
+            pass
 
     # 开发环境跳过签名验证
     if not signature or bot_type is None:
