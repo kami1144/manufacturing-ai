@@ -945,7 +945,7 @@ class ManufacturingLINEBot(LINEBot):
                     data = response.json()
                     results = data.get("results", [])
                     if results:
-                        return self._format_knowledge_reply(results)
+                        return self._format_knowledge_reply(results, text)
                     else:
                         # KB 无结果 → 走 AI fallback
                         return await self._handle_ai_fallback(text)
@@ -1036,7 +1036,7 @@ class ManufacturingLINEBot(LINEBot):
                 data = resp.json()
                 results = data.get("results", [])
                 if results:
-                    return self._format_knowledge_reply(results)
+                    return self._format_knowledge_reply(results, text)
             return await self._handle_ai_fallback(text)
         except Exception as e:
             print(f"[ERROR] Knowledge search error: {e}")
@@ -1102,13 +1102,21 @@ class ManufacturingLINEBot(LINEBot):
         if not results:
             return "📚 未找到相关内容"
 
+        # 从用户查询中提取关键术语用于精确定位
+        # 移除常见疑问词和助词，保留名词性关键词
+        stop_words = {"の", "は", "が", "を", "に", "で", "と", "です", "ます", "か", "?", "？", " ", "何", "什么", "哪些", "哪个"}
+        query_terms = [t.strip() for t in re.split(r"[\s\?]", user_query) if t.strip() and t.strip() not in stop_words]
+        # 取最后1-2个有实质意义的名词性词作为关键词（用户通常把核心问在后面）
+        keyword = "|".join(query_terms[-2:]) if len(query_terms) >= 2 else (query_terms[0] if query_terms else "")
+
         lines = []
         for i, r in enumerate(results, 1):
             title = r.get("title", "N/A")
             content = r.get("content", "")
 
-            # 精准提取「検査対象製品」「対象製品」等段落
-            snippet = self._extract_section(content, "検査対象製品|対象製品|品質検査", context_chars=500)
+            # 用用户查询词精准定位相关内容段落
+            search_kw = keyword if keyword else "検査対象製品|対象製品|品質検査"
+            snippet = self._extract_section(content, search_kw, context_chars=400)
 
             lines.append(f"📋 {title}\n{snippet}\n")
             if i >= 2:
