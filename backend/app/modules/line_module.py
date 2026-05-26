@@ -1104,7 +1104,7 @@ class ManufacturingLINEBot(LINEBot):
 
         # 从用户查询中提取关键术语用于精确定位
         # 移除常见疑问词和助词，保留名词性关键词
-        stop_words = {"の", "は", "が", "を", "に", "で", "と", "です", "ます", "か", "?", "？", " ", "何", "什么", "哪些", "哪个"}
+        stop_words = {"の", "は", "が", "を", "に", "で", "と", "です", "ます", "か", "?", "？", "何", "什么", "哪些", "哪个"}
         query_terms = [t.strip() for t in re.split(r"[\s\?]", user_query) if t.strip() and t.strip() not in stop_words]
         # 取最后1-2个有实质意义的名词性词作为关键词（用户通常把核心问在后面）
         keyword = "|".join(query_terms[-2:]) if len(query_terms) >= 2 else (query_terms[0] if query_terms else "")
@@ -1116,7 +1116,8 @@ class ManufacturingLINEBot(LINEBot):
 
             # 用用户查询词精准定位相关内容段落
             search_kw = keyword if keyword else "検査対象製品|対象製品|品質検査"
-            snippet = self._extract_section(content, search_kw, context_chars=400)
+            # 缩小上下文，减少冗余表格/无关内容
+            snippet = self._extract_section(content, search_kw, context_chars=200)
 
             lines.append(f"📋 {title}\n{snippet}\n")
             if i >= 2:
