@@ -241,7 +241,8 @@ async def search_blueprint(req: SearchRequest):
     if results:
         filtered = [r for r in results if r.get("score", 0) >= 1.5]
         if filtered:
-            return {"results": [{"title": r["title"], "content": r["content"][:300]} for r in filtered]}
+            # 不截断 content，让 _format_knowledge_reply 的 _extract_section 精确定位
+            return {"results": [{"title": r["title"], "content": r["content"]} for r in filtered]}
         # KB 相关性太低 → 返回空，让调用方走 AI fallback
         return {"results": []}
     else:
