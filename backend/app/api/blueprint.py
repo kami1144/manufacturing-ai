@@ -236,8 +236,11 @@ async def search_blueprint(req: SearchRequest):
     kb = get_kb()
     results = kb.search(req.query, top_k=req.top_k)
 
+    # 原因/为什么类问题 → 让 AI 回答，不走 KB 切片
+    if any(kw in req.query for kw in ["なぜ", "为什么", "原因", "理由", "なんで", " reason", " why", "何故"]):
+        return {"results": []}
+
     # 过滤低相关性结果（score < 1.5），避免答非所问
-    # 关键词匹配一个字给30分，必须匹配2个以上关键词才返回
     if results:
         filtered = [r for r in results if r.get("score", 0) >= 1.5]
         if filtered:
