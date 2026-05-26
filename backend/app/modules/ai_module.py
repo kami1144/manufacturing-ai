@@ -48,10 +48,25 @@ class AIManufacturing:
     """制造业 AI 对话"""
 
     def __init__(self):
-        self.api_key = os.getenv("AI_API_KEY", "")
+        # 优先从 hermes auth.json 读取有效 MiniMax key，否则回退到 .env
+        self.api_key = self._load_hermes_key() or os.getenv("AI_API_KEY", "")
         self.model = os.getenv("AI_MODEL", "MiniMax-M2.7")
         self.base_url = "https://api.minimax.chat/v1"
         self.timeout = 30.0
+
+    def _load_hermes_key(self) -> str:
+        """从 hermes auth.json 读取有效 MiniMax key"""
+        import json
+        try:
+            auth_path = os.path.expanduser("~/.hermes/auth.json")
+            with open(auth_path) as f:
+                d = json.load(f)
+            creds = d.get("credential_pool", {}).get("minimax", [])
+            if creds:
+                return creds[0].get("access_token", "") or ""
+        except Exception:
+            pass
+        return ""
 
     async def chat(self, message: str, history: list[dict] = None) -> str:
         """
