@@ -128,7 +128,7 @@ def _ollama_embed_texts(texts: List[str], model: str = "nomic-embed-text") -> np
         resp = requests.post(
             url,
             json={"model": model, "input": text},
-            timeout=30
+            timeout=30  # Ollama 模型冷启动需要加载时间，30s 足够
         )
         resp.raise_for_status()
         data = resp.json()

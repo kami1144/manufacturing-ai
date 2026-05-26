@@ -1035,7 +1035,7 @@ class ManufacturingLINEBot:
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.post(
-                    f"{self._base_url}/api/blueprint/search",
+                    f"{self._base_url}/api/blueprint/agentic-search",
                     json={"query": text, "top_k": 5},
                 )
                 if response.status_code == 200:

@@ -15,13 +15,27 @@ _kb = None
 
 
 def get_kb():
+    """返回 KB 实例（首次调用时后台加载，不阻塞 server）"""
     global _kb
     if _kb is None:
-        from app.modules.kb_module import get_kb as _get_kb, load_mock_data
-        _kb = _get_kb()
-        # 加载模拟数据
-        load_mock_data()
-        logger.info(f"KB loaded with {_kb.count()} entries")
+        import threading
+        import app.modules.kb_module as kb_mod
+
+        # 1. 立即设一个空壳 KB 避免阻塞
+        kb_mod._kb = kb_mod.KnowledgeBase()
+        _kb = kb_mod._kb
+
+        # 2. 后台线程完整初始化（load_mock_data 内部会重新 get_kb，跳过已设置的 _kb）
+        def _background_load():
+            try:
+                kb = kb_mod.get_kb()       # 内部检查 _kb is None → False → 返回已设的空壳
+                kb_mod.load_mock_data()    # 内部 get_kb() 同上，但数据会正确添加到底层 _entries
+                logger.info(f"KB background loaded: {kb.count()} entries")
+            except Exception as e:
+                logger.error(f"KB load error: {e}")
+
+        threading.Thread(target=_background_load, daemon=True).start()
+
     return _kb
 
 
@@ -245,6 +259,18 @@ async def kb_count():
     """知识库条目数量"""
     kb = get_kb()
     return {"count": kb.count(), "service": "knowledge_base"}
+
+
+@router.post("/agentic-search")
+async def agentic_search_blueprint(req: SearchRequest):
+    """LLM推理知识库搜索（精准回答版）"""
+    from app.workflow.kb_wrapper import agentic_search as _agentic_search
+    results = _agentic_search(req.query, top_k=req.top_k)
+    return {
+        "mode": "agentic",
+        "results": [{"title": r["title"], "content": r["content"]} for r in results],
+        "count": len(results)
+    }
 
 
 @router.post("/parse")

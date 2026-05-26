@@ -11,6 +11,7 @@
 
 from dataclasses import dataclass, field
 from typing import Optional
+import os
 import uuid
 import re
 import numpy as np
@@ -67,8 +68,20 @@ class KnowledgeBase:
             self._embeddings[entry_id] = emb
             self._embedding_loaded = True
         except Exception as e:
+            err_str = str(e)
+            # 快速失败：API key 无效时不重试，直接跳过
+            if "API_KEY" in err_str or "401" in err_str or "Invalid" in err_str or "not set" in err_str:
+                print(f"[WARN] Embedding skipped (no API key): {entry_id}")
+                self._embedding_loaded = False
+                return
+            # 网络超时/连接错误：不阻塞 KB 加载，跳过 embedding
+            if "timeout" in err_str.lower() or "TimedOut" in err_str or "Connection" in err_str or " refused" in err_str:
+                print(f"[WARN] Embedding skipped (Ollama unavailable): {entry_id}")
+                self._embedding_loaded = False
+                return
             print(f"[WARN] Embedding failed for {entry_id}: {e}")
             self._embedding_loaded = False
+            return  # 修复：异常后必须 return，否则继续执行业务逻辑
 
     def embed_all(self) -> int:
         """为所有已有条目批量生成向量（首次加载时调用）"""
@@ -232,6 +245,13 @@ def get_kb() -> KnowledgeBase:
 def load_mock_data():
     """加载模拟工厂数据（用于测试）"""
     kb = get_kb()
+
+    # ── 桌面工厂测试文档 ──────────────────────────────────────────────
+    # 从 ~/Desktop/factory-test-docs/ 加载 50 条真实工厂文档
+    factory_docs_dir = os.path.expanduser("~/Desktop/factory-test-docs")
+    if os.path.isdir(factory_docs_dir):
+        _load_factory_docs(kb, factory_docs_dir)
+    # ─────────────────────────────────────────────────────────────────────
 
     # 材质类
     kb.add(
@@ -400,3 +420,101 @@ def load_mock_data():
     )
 
     return kb
+
+
+def _load_factory_docs(kb: KnowledgeBase, docs_dir: str):
+    """从目录加载工厂测试文档到 KB"""
+    import glob
+
+    # 分类映射（从文件名推断）
+    category_map = {
+        "品質検査": "quality",
+        "製造指示": "process",
+        "設備メンテ": "equipment",
+        "安全チェック": "safety",
+        "原材料試験": "material",
+        "出荷検査": "quality",
+        "コスト見積": "cost",
+        "原価計算": "cost",
+        "プロセス改善": "improvement",
+        "顧客見積": "cost",
+        "工場監査": "audit",
+        "生産性向上": "production",
+        "納期遅延": "delivery",
+        "不適合品": "quality",
+        "温度管理": "other",
+        "仕入先評価": "audit",
+        "環境計測": "environment",
+        "工程能力": "process",
+        "ISO9001": "quality",
+        "作業標準": "process",
+        "減価償却": "equipment",
+        "物流進捗": "logistics",
+        "検査治具": "equipment",
+        "出荷予定": "logistics",
+        "廃棄物": "environment",
+        "サプライチェーン": "supply",
+        "試作品": "development",
+        "勤怠": "hr",
+        "不良解析": "process",
+        "安全衛生": "safety",
+        "受発注": "procurement",
+        "エネルギー": "environment",
+        "製造指図": "process",
+        "建設工事": "construction",
+        "購買": "procurement",
+        "5S": "production",
+        "外国人": "hr",
+        "工程管理": "process",
+        "機械潤滑": "equipment",
+        "検査成績": "quality",
+        "工場運営": "other",
+    }
+
+    pattern = os.path.join(docs_dir, "*.md")
+    files = sorted(glob.glob(pattern))
+
+    for filepath in files:
+        filename = os.path.basename(filepath)
+        # 跳过 QA 问答对文件
+        if filename.startswith("QA_"):
+            continue
+
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            if not content.strip():
+                continue
+
+            # 从第一行提取标题（## 标题 或 # 标题）
+            title = filename.replace(".md", "")
+            for line in content.split("\n"):
+                line = line.strip()
+                if line.startswith("# "):
+                    title = line[2:].strip()
+                    break
+
+            # 推断 category
+            category = "other"
+            for key, cat in category_map.items():
+                if key in filename:
+                    category = cat
+                    break
+
+            # 提取关键词（从标题和内容中抽词）
+            keywords = kb._extract_keywords(title + " " + content[:500])
+
+            kb.add(
+                title=title,
+                content=content,
+                category=category,
+                keywords=keywords,
+                source=filename,
+            )
+            print(f"  [KB] Loaded: {filename} ({category})")
+        except Exception as e:
+            print(f"  [KB] Failed to load {filepath}: {e}")
+
+    count = len(kb._entries)
+    print(f"  [KB] Total entries after factory docs: {count}")
