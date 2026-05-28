@@ -2,7 +2,7 @@
 
 Provides two search modes:
   - vector_search()    — embedding-based semantic search (original)
-  - agentic_search()    — LLM reasoning over knowledge tree (new)
+  - agentic_search()  — LLM reasoning over knowledge tree (new)
 """
 
 from app.modules.kb_module import get_kb
@@ -18,12 +18,11 @@ def vector_search(query: str, top_k: int = 3) -> list:
     return kb.vector_search(query, top_k=top_k)
 
 
-def agentic_search(query: str, top_k: int = 3, **kwargs) -> list:
+async def agentic_search(query: str, top_k: int = 3, **kwargs) -> list:
     """
-    Module-level wrapper for KB agentic search (LLM reasoning over tree).
+    Async wrapper for KB agentic search (LLM reasoning over tree).
 
     Drop-in replacement for vector_search() in the YAML workflow.
-    Falls back to keyword search if LLM is unavailable.
 
     Args:
         query: Search query string
@@ -33,4 +32,8 @@ def agentic_search(query: str, top_k: int = 3, **kwargs) -> list:
     Returns:
         List of result dicts: {title, content, category, score, source}
     """
+    # Lazy import to avoid circular import with blueprint.py
+    from app.api.blueprint import _kb_loaded_event
+    _kb_loaded_event.wait(timeout=30.0)
+
     return _agentic_search(query, top_k=top_k, **kwargs)

@@ -106,7 +106,7 @@ class KBToolsAgent:
         if not content_result.success:
             return self._fallback_keyword_search(query, top_k)
 
-        # Step 5: Build results
+        # Step 5: Build results (Strategy A: trust LLM, no content verification)
         results = []
         for entry in content_result.data:
             results.append({
@@ -142,19 +142,49 @@ class KBToolsAgent:
         # Build flat list of all leaf nodes for LLM to reference
         leaf_nodes = self._collect_leaf_nodes(tree_data)
 
+        # Pre-sort: entries with query keywords in title appear first (higher relevance)
+        query_lower = query.lower()
+
+        def title_relevance(node):
+            title = node.get("title", "").lower()
+            summary = node.get("summary", "").lower()
+            score = 0
+            # Exact query phrase in title
+            if query_lower in title:
+                score += 100
+            # Individual query words in title
+            for word in query_lower.split():
+                if len(word) >= 2:
+                    if word in title:
+                        score += 10
+                    if word in summary:
+                        score += 5
+            return score
+
+        sorted_nodes = sorted(leaf_nodes, key=title_relevance, reverse=True)
+
+        # Limit to top 40 entries to avoid token overflow (68 entries is too many for small models)
+        display_nodes = sorted_nodes[:40]
+        omitted = len(sorted_nodes) - len(display_nodes)
+
         leaf_list = "\n".join(
-            f"  - {node['title']} (id: {node['id']})"
-            for node in leaf_nodes
+            f"  - [{node['id']}] {node['title']}: {node.get('summary', '')[:150]}"
+            for node in display_nodes
         )
 
+        if omitted > 0:
+            entry_note = f"\n（共 {len(sorted_nodes)} 条记录，显示前 {len(display_nodes)} 条与查询最相关的条目）"
+        else:
+            entry_note = ""
+
         prompt = (
-            "你是制造业知识库检索助手。请根据用户查询，从以下知识库条目中识别最相关的 ID。\n\n"
+            "你是制造业知识库检索助手。请根据用户查询，从以下知识库条目中识别最相关的条目。\n"
+            "每个条目格式：[node_id] 标题: 一句话摘要\n"
             + context_str
-            + "用户查询：" + query + "\n\n"
+            + f"用户查询：{query}{entry_note}\n\n"
             "知识库条目：\n" + leaf_list + "\n\n"
-            "请按以下格式回复（只回复这一行，不要其他文字）：\n"
-            "RETRIEVE: id1, id2, id3\n\n"
-            "找到与查询最相关的条目，最多返回 " + str(top_k) + " 个，按相关性排序。"
+            "请从上述条目中选择与查询最相关的 " + str(top_k) + " 个，回复格式如下（只回复这一行，不要其他文字）：\n"
+            "RETRIEVE: id1, id2, id3"
         )
         return prompt
 
@@ -184,6 +214,50 @@ class KBToolsAgent:
         # Fallback: look for UUID-like patterns
         fallback_ids = re.findall(r'[\w]{8}-[\w]{4}', response)
         return fallback_ids[:5]
+
+    def _verify_content_match(self, entries: list, query: str) -> list:
+        """
+        Verify that a sufficient fraction of query keywords actually appear in content.
+        LLM reasoning over titles+summaries can hallucinate relevance.
+
+        Rules:
+        - Extract meaningful keywords (>=2 chars, exclude particles)
+        - Exclude company names (they appear in headers but don't mean content relevance)
+        - Require >= 50% of core keywords to appear in content (strict majority)
+        - Fallback to returning entries if no keywords extracted
+        """
+        import re
+        query_lower = query.lower()
+
+        # Company name patterns to exclude — these appear in doc headers, not body
+        company_exclude = {
+            "島津製作所", " Shimadzu", "岛津", "丰田", "トヨタ", "日本マシナリー",
+            "山田製作所", "三菱", "横河", " Hitachi", "NEC", "Panasonic"
+        }
+
+        stop = {"の", "は", "が", "を", "に", "で", "と", "です", "ます", "か",
+                 "実施", "された", "についての", "何", "どんな", "どの", "什么", "哪些",
+                 "哪個", "哪个", "什麼", "什么"}
+        sep = r'[\s\?。、，。！＼？（）()「」『』【】、,．.：:""''《》〈〉]'
+        raw_keywords = [k for k in re.split(sep, query_lower) if k and len(k) >= 2 and k not in stop]
+
+        # Filter out company names and very short matches
+        core_keywords = [k for k in raw_keywords if k not in company_exclude and not any(
+            c in k for c in company_exclude)]
+
+        if not core_keywords:
+            return entries  # Nothing to verify against
+
+        # Require majority of core keywords to appear in content
+        threshold = max(1, len(core_keywords) // 2)
+        verified = []
+        for entry in entries:
+            content_lower = entry.get("content", "").lower()
+            hits = sum(1 for kw in core_keywords if kw in content_lower)
+            if hits >= threshold:
+                verified.append(entry)
+
+        return verified
 
     def _fallback_keyword_search(self, query: str, top_k: int) -> list:
         """When LLM reasoning fails, fall back to keyword search."""
@@ -227,9 +301,27 @@ def agentic_search(query: str, top_k: int = 3, **kwargs) -> list:
         )
         loop.close()
     else:
-        # Already inside async context — can't use run_until_complete
-        # Fall back to sync keyword search as a safe alternative
-        results = agent._fallback_keyword_search(query, top_k)
+        # Already inside async context — create a dedicated loop in a worker thread
+        # to run the async coroutine without nesting event loops
+        import threading
+        result_holder = []
+
+        def _run_async():
+            new_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(new_loop)
+            try:
+                result_holder.append(
+                    new_loop.run_until_complete(
+                        agent.retrieve(query, top_k, kwargs.get("blueprint_context"))
+                    )
+                )
+            finally:
+                new_loop.close()
+
+        thread = threading.Thread(target=_run_async)
+        thread.start()
+        thread.join()
+        results = result_holder[0] if result_holder else agent._fallback_keyword_search(query, top_k)
 
     # Normalize to match existing interface
     return [

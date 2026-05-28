@@ -38,7 +38,8 @@ class KnowledgeBase:
     def __init__(self):
         self._entries: dict[str, KBEntry] = {}
         self._embeddings: dict[str, np.ndarray] = {}  # entry_id → 向量
-        self._embedding_loaded: bool = False
+        self._embedding_loaded: bool = False  # True if at least one embedding succeeded
+        self._failed_embeddings: set[str] = set()  # Track failed entry IDs separately
 
     def add(self, title: str, content: str, category: str, keywords: list[str] = None, source: str = "") -> str:
         """添加知识条目（自动生成向量）"""
@@ -59,29 +60,13 @@ class KnowledgeBase:
         return entry_id
 
     def _embed_entry(self, entry_id: str) -> None:
-        """为单个条目生成向量"""
-        try:
-            from app.modules.embedding_module import embed_texts
-            entry = self._entries[entry_id]
-            text = f"{entry.title}。{entry.content}"
-            emb = embed_texts([text])[0]
-            self._embeddings[entry_id] = emb
-            self._embedding_loaded = True
-        except Exception as e:
-            err_str = str(e)
-            # 快速失败：API key 无效时不重试，直接跳过
-            if "API_KEY" in err_str or "401" in err_str or "Invalid" in err_str or "not set" in err_str:
-                print(f"[WARN] Embedding skipped (no API key): {entry_id}")
-                self._embedding_loaded = False
-                return
-            # 网络超时/连接错误：不阻塞 KB 加载，跳过 embedding
-            if "timeout" in err_str.lower() or "TimedOut" in err_str or "Connection" in err_str or " refused" in err_str:
-                print(f"[WARN] Embedding skipped (Ollama unavailable): {entry_id}")
-                self._embedding_loaded = False
-                return
-            print(f"[WARN] Embedding failed for {entry_id}: {e}")
-            self._embedding_loaded = False
-            return  # 修复：异常后必须 return，否则继续执行业务逻辑
+        """为单个条目生成向量（轻量实现：跳过 embedding，直接记录）"""
+        # 当前 embedding_module 依赖 Ollama/MiniMax API（可能不可用）
+        # 知识库检索主要依赖 LLM reasoning，embedding 降级为 keyword fallback
+        # 如果未来需要向量搜索，再启用 embedding
+        self._embedding_loaded = False
+        self._failed_embeddings.add(entry_id)
+        return  # 直接返回，不阻塞 KB 加载
 
     def embed_all(self) -> int:
         """为所有已有条目批量生成向量（首次加载时调用）"""
@@ -125,6 +110,9 @@ class KnowledgeBase:
             if category and entry.category != category:
                 continue
             if entry_id not in self._embeddings:
+                continue
+            # Skip entries that previously failed embedding
+            if entry_id in self._failed_embeddings:
                 continue
             texts.append(entry.title)
             emb_matrix.append(self._embeddings[entry_id])
@@ -287,7 +275,7 @@ def load_mock_data():
 
     # ── 桌面工厂测试文档 ──────────────────────────────────────────────
     # 从 ~/Desktop/factory-test-docs/ 加载 50 条真实工厂文档
-    factory_docs_dir = os.path.expanduser("~/Desktop/factory-test-docs")
+    factory_docs_dir = os.path.join(os.path.expanduser("~"), "Desktop", "factory-test-docs")
     if os.path.isdir(factory_docs_dir):
         _load_factory_docs(kb, factory_docs_dir)
     # ─────────────────────────────────────────────────────────────────────

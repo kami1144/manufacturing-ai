@@ -40,6 +40,7 @@ SCENE_KEYWORDS = {
 }
 
 # 报价流程 QuickReply 选项
+# TODO: Move to config file (e.g., config.yaml or database) for easy modification
 QUOTE_MATERIAL_OPTIONS = ["SUS304", "SUS303", "SECC", "SPCC", "ADC12", "A5052", "其他材质"]
 QUOTE_QUANTITY_OPTIONS = ["1-10件", "11-50件", "51-100件", "100+件"]
 QUOTE_PROCESS_OPTIONS = ["CNC加工", "钣金加工", "压铸铸造", "表面处理"]
@@ -319,7 +320,8 @@ class ManufacturingLINEBot(LINEBot):
         elif scene == "sample":
             result = await self._handle_sample(text, reply_token)
         else:
-            result = await self._handle_general(text, reply_token)
+            # All other intents (including unclassified) → knowledge search
+            result = await self._handle_knowledge(text, reply_token)
 
         return result
 
@@ -358,6 +360,7 @@ class ManufacturingLINEBot(LINEBot):
 
         # ── 从文本提取已有关键信息（优先于 QuickReply） ──
         # 材质
+        # Note: Only captures first match - known limitation for future multi-material support
         material_match = re.search(r"(SUS\d+|SECC|SPCC|ADC\d+|A5052)", text.upper())
         if material_match and not state.get("material"):
             state = self._state.update_state(user_id, material=material_match.group(0))
@@ -932,27 +935,43 @@ class ManufacturingLINEBot(LINEBot):
             }
         }
 
+    async def _search_knowledge(self, query: str, top_k: int = 5) -> str:
+        """Shared knowledge base search helper.
+
+        Args:
+            query: Search query text
+            top_k: Number of results to return
+
+        Returns:
+            Formatted knowledge reply or AI fallback response
+        """
+        import asyncio
+        from concurrent.futures import ThreadPoolExecutor
+        from app.workflow.kb_wrapper import agentic_search
+
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+        from app.workflow.kb_agent import agentic_search as _sync_agentic_search
+
+        def _sync_search():
+            return _sync_agentic_search(query, top_k=top_k)
+
+        with ThreadPoolExecutor() as pool:
+            results = await loop.run_in_executor(pool, _sync_search)
+
+        if results:
+            return self._format_knowledge_reply(results, query)
+        # No KB results → fallback to AI
+        return await self._handle_ai_fallback(query)
+
     async def _handle_material(self, text: str, reply_token: str) -> str:
         """处理材质查询"""
-        # 从知识库查询材质价格
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(
-                    f"{self._base_url}/api/blueprint/agentic-search",
-                    json={"query": text, "top_k": 3},
-                )
-                if response.status_code == 200:
-                    data = response.json()
-                    results = data.get("results", [])
-                    if results:
-                        return self._format_knowledge_reply(results, text)
-                    else:
-                        # KB 无结果 → 走 AI fallback
-                        return await self._handle_ai_fallback(text)
-                else:
-                    return "知识库查询失败，请稍后再试。"
+            return await self._search_knowledge(text, top_k=3)
         except Exception as e:
-            print(f"[ERROR] Knowledge API error: {e}")
+            print(f"[ERROR] Knowledge API error: {str(e)}")
             return "⚠️ 材质查询失败，请稍后再试。"
 
     async def _handle_process(self, text: str, reply_token: str) -> str:
@@ -1025,22 +1044,7 @@ class ManufacturingLINEBot(LINEBot):
 
     async def _handle_knowledge(self, text: str, reply_token: str) -> str:
         """Handle knowledge base search"""
-        try:
-            import httpx
-            # Use HTTP API (reliable, already tested) instead of direct function call
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(
-                    "http://127.0.0.1:8000/api/blueprint/agentic-search",
-                    json={"query": text, "top_k": 5},
-                )
-                data = resp.json()
-                results = data.get("results", [])
-                if results:
-                    return self._format_knowledge_reply(results, text)
-            return await self._handle_ai_fallback(text)
-        except Exception as e:
-            print(f"[ERROR] Knowledge search error: {e}")
-            return "⚠️ 知识库查询失败，请稍后再试。"
+        return await self._search_knowledge(text, top_k=5)
 
     async def _handle_general(self, text: str, reply_token: str) -> str:
         """处理通用消息 → 不搜 KB，直接走 AI 判断是否在制造业范围内"""
@@ -1081,49 +1085,247 @@ class ManufacturingLINEBot(LINEBot):
 *实际价格根据图纸复杂度确定"""
 
     def _extract_section(self, content: str, keyword: str, context_chars: int = 600) -> str:
-        """Extract paragraph block containing keyword (for precise answers)"""
-        # Handle OR patterns (e.g. "検査対象製品|対象製品|品質検査")
-        pattern = re.compile(keyword, re.IGNORECASE)
-        match = pattern.search(content)
-        if not match:
+        """Extract paragraph block centered on the line containing the keyword.
+
+        Args:
+            content: Full document content
+            keyword: Search keyword (supports OR patterns like "A|B")
+            context_chars: Characters of context after keyword
+
+        Returns:
+            Paragraph block centered on keyword line, expanded to nearest blank lines
+        """
+        # Handle OR patterns: preprocess to find ANY matching keyword variant
+        keyword = keyword.strip()
+        if '|' in keyword:
+            # Split OR pattern and search for each variant (case-insensitive)
+            pattern_parts = [p.strip() for p in keyword.split('|')]
+            # Find the line that contains any keyword variant
+            best_line = None
+            best_pos = -1
+            for idx, line in enumerate(content.split('\n')):
+                line_lower = line.lower()
+                for part in pattern_parts:
+                    if part.lower() in line_lower:
+                        # Found a match - use this line position
+                        best_line = line
+                        best_pos = idx
+                        break
+                if best_line is not None:
+                    break
+            if best_line is None:
+                return content[:400]
+            # Find nearest blank lines to expand paragraph
+            lines = content.split('\n')
+            start_line = best_pos
+            end_line = best_pos
+            # Expand backward to nearest blank line
+            while start_line > 0 and lines[start_line - 1].strip():
+                start_line -= 1
+            # Expand forward to nearest blank line
+            while end_line < len(lines) - 1 and lines[end_line + 1].strip():
+                end_line += 1
+            # Join lines in expanded range
+            return '\n'.join(lines[start_line:end_line + 1]).strip()
+
+        # Single keyword: Find line containing the keyword
+        lines = content.split('\n')
+        found_line_idx = -1
+        keyword_lower = keyword.lower()
+        for idx, line in enumerate(lines):
+            if keyword_lower in line.lower():
+                found_line_idx = idx
+                break
+
+        if found_line_idx == -1:
             return content[:400]
-        # Find the nearest line boundary around the match
-        start = max(0, match.start() - 100)
-        end = min(len(content), match.end() + context_chars)
-        # Adjust to nearest line break
-        line_start = content.rfind('\n', 0, start) + 1
-        line_end = content.find('\n', end)
-        if line_end == -1:
-            line_end = len(content)
-        return content[line_start:line_end].strip()
+
+        # Expand to nearest blank lines
+        start_line = found_line_idx
+        end_line = found_line_idx
+        # Expand backward
+        while start_line > 0 and lines[start_line - 1].strip():
+            start_line -= 1
+        # Expand forward
+        while end_line < len(lines) - 1 and lines[end_line + 1].strip():
+            end_line += 1
+
+        return '\n'.join(lines[start_line:end_line + 1]).strip()
 
     def _format_knowledge_reply(self, results: List[dict], user_query: str = "") -> str:
-        """格式化知识库回复，精准提取相关内容"""
+        """解析 markdown 报告，提取关键数据生成简短回答
+
+        Priority order:
+        1. _extract_section: paragraph containing query keyword (most precise)
+        2. All tables: try each table in order, use first that produces useful output
+        3. Non-table paragraphs: short paragraph with numbers and data
+        4. "Not found" if nothing useful extracted
+        """
         if not results:
             return "📚 未找到相关内容"
 
-        # 从用户查询中提取关键术语用于精确定位
-        # 移除常见疑问词和助词，保留名词性关键词
-        stop_words = {"の", "は", "が", "を", "に", "で", "と", "です", "ます", "か", "?", "？", "何", "什么", "哪些", "哪个"}
-        query_terms = [t.strip() for t in re.split(r"[\s\?]", user_query) if t.strip() and t.strip() not in stop_words]
-        # 取最后1-2个有实质意义的名词性词作为关键词（用户通常把核心问在后面）
-        keyword = "|".join(query_terms[-2:]) if len(query_terms) >= 2 else (query_terms[0] if query_terms else "")
+        r = results[0]
+        title = r.get("title", "")
+        content = r.get("content", "")
 
-        lines = []
-        for i, r in enumerate(results, 1):
-            title = r.get("title", "N/A")
-            content = r.get("content", "")
+        # Priority 1: _extract_section —精准提取含查询关键词的段落
+        if user_query:
+            section = self._extract_section(content, user_query, context_chars=600)
+            if section and len(section) > 20:
+                return f"【{title}】\n{section}"
 
-            # 用用户查询词精准定位相关内容段落
-            search_kw = keyword if keyword else "検査対象製品|対象製品|品質検査"
-            # 缩小上下文，减少冗余表格/无关内容
-            snippet = self._extract_section(content, search_kw, context_chars=200)
+        # Priority 2: Try ALL tables, use first one that produces useful output
+        tables = self._parse_markdown_tables(content)
+        for tbl in tables:
+            result = self._extract_by_table(tbl, user_query, title)
+            if result:
+                return result
 
-            lines.append(f"📋 {title}\n{snippet}\n")
-            if i >= 2:
+        # Priority 3: Non-table paragraphs
+        for para in re.split(r"\n\n", content):
+            p = self._clean_markdown(para)
+            if 15 < len(p) < 200 and re.search(r"\d", p) and "|" not in p and not p.startswith("#") and not p.startswith("-"):
+                return f"【{title}】\n{p}"
+
+        # Priority 4: No useful extraction — KB has the doc but content doesn't match query
+        # If we have results, warn the user the specific info isn't in the doc
+        if results:
+            return (f"【{title}】\n"
+                    f"📋 文档存在，但未找到与「{user_query}」相关的内容。\n"
+                    f"💡 建议：请提供更具体的信息，或联系客服。")
+        return "📚 未找到相关内容"
+
+    def _parse_markdown_tables(self, content: str) -> List[List[List[str]]]:
+        """解析所有 markdown 表格，返回 [table1, table2, ...]"""
+        lines = content.split('\n')
+        tables, current = [], []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                if current:
+                    tables.append(current); current = []
+                continue
+            if re.match(r'^\|[-:\s|]+$', line):
+                continue
+            if line.startswith('|') and line.endswith('|'):
+                cells = [c.strip() for c in line.strip('|').split('|')]
+                if cells and any(c.strip() for c in cells):
+                    current.append(cells)
+        if current:
+            tables.append(current)
+        return tables
+
+    def _clean_markdown(self, text: str) -> str:
+        """清理 markdown 格式，保留有用文字"""
+        text = re.sub(r'\[.*?\]', '', text)
+        text = re.sub(r'[*_`#>\-~]', '', text)
+        return ' '.join(text.split())
+
+    def _best_table(self, tables: List[List[List[str]]], query: str):
+        """根据查询关键词选最相关的表格"""
+        if not tables:
+            return None
+        if len(tables) == 1:
+            return tables[0]
+
+        # 提取关键词（>=2字的独立词）
+        stop = {"の", "は", "が", "を", "に", "で", "と", "です", "ます", "か",
+                "実施", "された", "についての", "何", "どんな", "どの", "什么", "哪些"}
+        SEP = r'[\s\?。、，。！＼？（）()「」『』【】、,．.：:""''《》〈〉]'
+        terms = [t for t in re.split(SEP, query) if t and len(t) >= 2 and t not in stop]
+        if not terms:
+            return tables[0]
+
+        # 每张表打分：命中的查询词越多越相关
+        scored = []
+        for t in tables:
+            if len(t) < 2:
+                scored.append(-1); continue
+            all_text = "\t".join("\t".join(self._clean_markdown(c) for c in row) for row in t)
+            hits = sum(1 for term in terms if term in all_text)
+            scored.append(hits)
+
+        max_score = max(scored)
+        if max_score == 0:
+            return None
+        # 取最后一个最高分（后面的表通常是数据表而非基本信息表）
+        best_idx = len(scored) - 1 - scored[::-1].index(max_score)
+        return tables[best_idx]
+
+    def _is_header_table(self, table: List[List[str]]) -> bool:
+        """表头首列是'項目/品名/測定項目'类的是基本信息表"""
+        if len(table) < 2:
+            return False
+        h0 = self._clean_markdown(table[0][0])
+        return h0 in {"項目", "品名", "測定項目", "区分", "検査項目", "項目名", "項目内容"}
+
+    def _extract_by_table(self, table: List[List[str]], query: str, title: str) -> str:
+        """从选中表格提取关键数据"""
+        header = [self._clean_markdown(h) for h in table[0]]
+
+        if self._is_header_table(table):
+            # 基本信息表：返回所有(項目, 內容)
+            parts = []
+            for row in table[1:]:
+                if len(row) >= 2:
+                    item = self._clean_markdown(row[0])
+                    val = self._clean_markdown(row[-1])
+                    if val and val not in {"OK", "PASS", "NG", "FAIL", "—", "適合", "不適合", "N/A"}:
+                        parts.append(f"{item}：{val}")
+            if parts:
+                return f"【{title}】\n" + " / ".join(parts[:5])
+            return None
+
+        # 数据表：找值列
+        vcol = len(header) - 1
+        skip = {"項目", "測定項目", "検査項目", "品名", "区分", "測定項目"}
+        for i, h in enumerate(header):
+            if h not in skip and any(kw in h for kw in ["測定値", "規格値", "結果", "判定", "番号", "数量"]):
+                vcol = i; break
+
+        # 关键词过滤
+        SEP = r'[\s\?。、，。！＼？（）()「」『』【】、,．.：:""''《》〈〉]'
+        terms = [t for t in re.split(SEP, query) if t and len(t) >= 2]
+
+        parts = []
+        for row in table[1:]:
+            if len(row) <= vcol:
+                continue
+            row_flat = "\t".join(self._clean_markdown(c) for c in row)
+            if terms and not any(term in row_flat for term in terms):
+                continue
+            item = self._clean_markdown(row[0])
+            val = self._clean_markdown(row[vcol])
+            if not val or val in {"OK", "PASS", "NG", "FAIL", "—", "適合", "不適合"}:
+                continue
+            parts.append(f"{item}：{val}")
+
+        if parts:
+            return f"【{title}】\n" + " / ".join(parts[:5])
+        return None
+
+    def _parse_markdown_table(self, content: str) -> List[List[str]]:
+        """解析 markdown 表格，返回 [[col1, col2, ...], [row1], [row2], ...]"""
+        lines = content.split("\n")
+        table = []
+        in_table = False
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            # 跳过 markdown 表格分隔行（如 |---|---|）
+            if re.match(r"^\|[-:\s|]+\|$", line):
+                in_table = True
+                continue
+            if line.startswith("|") and line.endswith("|"):
+                cells = [c.strip() for c in line.strip("|").split("|")]
+                if cells and any(c.strip() for c in cells):
+                    table.append(cells)
+                in_table = True
+            elif in_table and not line.startswith("|"):
+                # 表格结束
                 break
-
-        return "\n".join(lines) if lines else "📚 未找到相关内容"
+        return table
 
     def create_quick_reply(self) -> dict:
         """创建 Quick Reply 消息"""

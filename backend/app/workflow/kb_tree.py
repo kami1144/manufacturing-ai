@@ -309,17 +309,84 @@ class KnowledgeTree:
         return estimate_tokens(text)
 
     def _summarize_entry(self, entry: dict) -> str:
-        """Generate a one-sentence summary from entry content."""
+        """Generate a one-sentence summary from entry content.
+        
+        Strategy:
+        - If content starts with markdown header (# title), skip the header line.
+        - Skip table content (lines containing | and not being a header).
+        - Skip table separators (|---|---|), list markers (- • *), blank lines.
+        - Find the first substantial sentence (ends with 。 or has 30+ chars).
+        """
         content = entry.get("content", "")
         if not content:
             return entry.get("title", "")
 
-        # Take first sentence or first 100 chars
-        sentences = re.split(r'[。\n]', content)
-        first = sentences[0].strip() if sentences else ""
-        if len(first) > 100:
-            first = first[:100] + "..."
-        return first if first else entry.get("title", "")
+        lines = content.split('\n')
+        meaningful_lines = []
+        in_table = False
+        
+        for line in lines:
+            line = line.strip()
+            
+            # Skip empty lines
+            if not line:
+                in_table = False
+                continue
+            
+            # Markdown headers (## heading, ### heading, etc.) → skip
+            # Must match "#+ " pattern, not just starting with #
+            if re.match(r'^#+\s', line):
+                continue
+            
+            # Table separator → end of table
+            if re.match(r'^\|[\s\-:|]+\|$', line):
+                in_table = False
+                continue
+            
+            # Count pipes to detect table rows
+            pipe_count = line.count('|')
+            # Table rows typically have | at start/end and multiple cells
+            if pipe_count >= 2 and line.startswith('|'):
+                # If this looks like table data (many pipes or structured cells), skip
+                if pipe_count >= 3:
+                    in_table = True
+                    continue
+                # Single-pipe lines might be legitimate content - but check for structure
+                if pipe_count == 2 and ('---' in line or re.match(r'^\|[_\s\-]+\|$', line)):
+                    continue
+            
+            # Markdown image links and reference links → skip
+            if re.match(r'!\[.*\]\(.*\)', line) or re.match(r'\[.*\]\(.*\)', line):
+                continue
+
+            # Strip leading list markers (•, -, *) for evaluation
+            stripped_line = re.sub(r'^[-*•]\s+', '', line)
+            
+            # List items → skip short ones
+            if re.match(r'^[-*•]\s', line) and len(stripped_line) < 50:
+                continue
+            
+            # Skip lines that are clearly table content
+            if in_table:
+                continue
+            
+            meaningful_lines.append(line)
+        
+        if not meaningful_lines:
+            return entry.get("title", "")
+
+        # Find first substantial sentence
+        for line in meaningful_lines:
+            # Chinese sentence ending
+            if len(line) >= 20 and ('。' in line or '？' in line or '！' in line):
+                return line[:150] + "..." if len(line) > 150 else line
+            # English text with periods or long enough
+            if len(line) >= 50 and ('.' in line or len(line) >= 80):
+                return line[:150] + "..." if len(line) > 150 else line
+
+        # Fallback: first meaningful line
+        first = meaningful_lines[0]
+        return first[:100] + "..." if len(first) > 100 else first
 
     # ── Agentic Retrieval ────────────────────────────────────────────────────────
 
@@ -375,14 +442,26 @@ class KnowledgeTree:
         """
         Fallback keyword search over all entries.
         Used when LLM reasoning is unavailable or as baseline comparison.
+
+        Reranking: boost equipment-category entries when query strongly suggests
+        equipment/inspection-tool intent (e.g. 冶具, 針規, 台帳, 検査治具).
         """
         query_lower = query.lower().strip()
+
+        # Equipment intent signal — query mentions device/equipment management terms
+        equipment_signals = {
+            "冶具", "治具", "針規", "针规", "台帳", "台账", "管理台帳", "管理台账",
+            "検査治具", "检验治具", "校正", "校准", "測定器", "测定器",
+            "設備", "设备", "保全員", "保全记录"
+        }
+        has_equipment_intent = any(sig in query_lower for sig in equipment_signals)
+
         clean_pattern = re.compile(r'[^\w\u4e00-\u9fff]+')
         query_clean = clean_pattern.sub('', query_lower)
 
         scored = []
         for entry_id, entry in self.entries.items():
-            score = self._keyword_score(query_lower, query_clean, entry)
+            score = self._keyword_score(query_lower, query_clean, entry, has_equipment_intent)
             if score > 0:
                 scored.append(SearchResult(
                     entry_id=entry_id,
@@ -396,11 +475,12 @@ class KnowledgeTree:
         scored.sort(key=lambda x: x.score, reverse=True)
         return scored[:top_k]
 
-    def _keyword_score(self, query_lower: str, query_clean: str, entry: dict) -> float:
+    def _keyword_score(self, query_lower: str, query_clean: str, entry: dict, has_equipment_intent: bool = False) -> float:
         score = 0.0
         title_lower = entry.get("title", "").lower()
         content_lower = entry.get("content", "").lower()
         keywords = entry.get("keywords", [])
+        category = entry.get("category", "")
 
         if query_lower in title_lower:
             score += 30
@@ -416,6 +496,11 @@ class KnowledgeTree:
         title_chars = set(re.sub(r'[^\w\u4e00-\u9fff]', '', title_lower))
         char_overlap = len(q_chars & title_chars) / max(len(q_chars), 1)
         score += char_overlap * 5
+
+        # Equipment intent boost: if query mentions equipment/instrument terms,
+        # boost entries from 'equipment' category significantly
+        if has_equipment_intent and category == "equipment":
+            score *= 2.0
 
         return score
 
