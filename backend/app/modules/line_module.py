@@ -1187,12 +1187,41 @@ class ManufacturingLINEBot(LINEBot):
             if 15 < len(p) < 200 and re.search(r"\d", p) and "|" not in p and not p.startswith("#") and not p.startswith("-"):
                 return f"【{title}】\n{p}"
 
+<<<<<<< Updated upstream
         # Priority 4: No useful extraction — KB has the doc but content doesn't match query
         # If we have results, warn the user the specific info isn't in the doc
         if results:
             return (f"【{title}】\n"
                     f"📋 文档存在，但未找到与「{user_query}」相关的内容。\n"
                     f"💡 建议：请提供更具体的信息，或联系客服。")
+=======
+        prompt = f"""用户问题: {user_query}
+
+参考文档:
+{content}
+
+请根据以上文档回答用户的问题。"""
+
+        try:
+            import asyncio
+            import concurrent.futures
+            ai = AIManufacturing()
+            try:
+                loop = asyncio.get_running_loop()
+                # 已在事件循环中，通过线程池执行避免冲突
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    future = pool.submit(asyncio.run, ai.chat(prompt))
+                    answer = future.result()
+            except RuntimeError:
+                # 没有运行中的事件循环，直接运行
+                answer = asyncio.run(ai.chat(prompt))
+            answer = answer.strip()
+            if not answer or "Error" in answer:
+                return f"【{title}】\n回答を生成できませんでした。"
+            return f"【{title}】\n{self._clean_markdown(answer)}"
+        except Exception as e:
+            return f"【{title}】\n回答の生成に失敗しました: {str(e)}"
+>>>>>>> Stashed changes
         return "📚 未找到相关内容"
 
     def _parse_markdown_tables(self, content: str) -> List[List[List[str]]]:

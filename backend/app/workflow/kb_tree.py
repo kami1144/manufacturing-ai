@@ -260,7 +260,8 @@ class KnowledgeTree:
     def _build_leaf_node(self, entry: dict) -> TreeNode:
         """Build a leaf node from a single KB entry."""
         content = entry.get("content", "")
-        preview = content[:200] if content else ""
+        # 800 chars: enough for LLM to see meaningful content including key sections
+        preview = content[:800] if content else ""
 
         return TreeNode(
             id=f"leaf_{entry['id']}",
@@ -483,19 +484,31 @@ class KnowledgeTree:
         category = entry.get("category", "")
 
         if query_lower in title_lower:
-            score += 30
+            score += 40
         if query_lower in content_lower:
-            score += 15
+            score += 20
         for kw in keywords:
             if kw.lower() in query_lower:
                 score += 10
             elif query_lower in kw.lower():
                 score += 8
 
+        # 日文多字符词组精确命中 content 时额外加权
+        # 例："品質検査対象製品" 全句命中 content = +30
+        if len(query_lower) >= 4 and query_lower in content_lower:
+            score += 30
+
         q_chars = set(query_clean)
         title_chars = set(re.sub(r'[^\w\u4e00-\u9fff]', '', title_lower))
         char_overlap = len(q_chars & title_chars) / max(len(q_chars), 1)
-        score += char_overlap * 5
+        score += char_overlap * 8  # 原来 5 → 8，提高 CJK 字符重叠权重
+
+        # CJK term-level boost: each query term (2+ chars) found in content gets +5
+        term_pattern = re.compile(r'[\w\u4e00-\u9fff]{2,}')
+        query_terms = term_pattern.findall(query_lower)
+        content_full = entry.get("content", "").lower()
+        terms_found = sum(1 for t in query_terms if t in content_full)
+        score += terms_found * 5
 
         # Equipment intent boost: if query mentions equipment/instrument terms,
         # boost entries from 'equipment' category significantly

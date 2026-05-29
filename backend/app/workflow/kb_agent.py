@@ -93,7 +93,17 @@ class KBToolsAgent:
         # Step 2: Build prompt and call LLM
         prompt = self._build_retrieval_prompt(query, tree_data, blueprint_context, top_k)
 
+<<<<<<< Updated upstream
         llm_response = await self.ai.chat(prompt)
+=======
+        # Step 3: Run searches in parallel, merge results via RRF
+        all_results = []
+        try:
+            tasks = [self._search_single(q, tree_data, blueprint_context, top_k) for q in all_searches]
+            search_results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=60.0)
+        except Exception:
+            search_results = []
+>>>>>>> Stashed changes
 
         # Step 3: Parse entry IDs from LLM response
         entry_ids = self._parse_entry_ids_from_response(llm_response)
@@ -119,6 +129,50 @@ class KBToolsAgent:
             })
         return results
 
+<<<<<<< Updated upstream
+=======
+    async def _generate_query_variants(self, query: str) -> list[str]:
+        """Generate semantically diverse query variants to improve recall."""
+        prompt = (
+            f"原始问题：{query}\n"
+            "请生成3个语义等价但表达不同的查询变体，覆盖不同角度：\n"
+            "1. 技术术语版（用专业缩写或日文术语）\n"
+            "2. 描述现象版（描述具体现象而非抽象指标名）\n"
+            "3. 中英混合版\n"
+            "只输出3行，每行一个查询变体，不要编号或其他说明。"
+        )
+        try:
+            response = await asyncio.wait_for(self.ai.chat(prompt), timeout=5.0)
+            variants = [v.strip() for v in response.split('\n') if v.strip() and len(v.strip()) > 5]
+            return variants[:3]
+        except Exception:
+            return []
+
+    async def _search_single(
+        self,
+        query: str,
+        tree_data: dict,
+        blueprint_context: Optional[dict],
+        top_k: int,
+    ) -> list[tuple[str, str, str]]:
+        """Run a single query variant through LLM retrieval."""
+        prompt = self._build_retrieval_prompt(query, tree_data, blueprint_context, top_k)
+        try:
+            llm_response = await asyncio.wait_for(self.ai.chat(prompt), timeout=30.0)
+        except Exception:
+            return []
+        entry_ids = self._parse_entry_ids_from_response(llm_response)
+        if not entry_ids:
+            return []
+        content_result = self.get_entries_content(entry_ids[:top_k])
+        if not content_result.success:
+            return []
+        return [
+            (entry.get("id", ""), entry.get("content", ""), entry.get("title", ""))
+            for entry in content_result.data
+        ]
+
+>>>>>>> Stashed changes
     def _build_retrieval_prompt(
         self,
         query: str,

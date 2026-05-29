@@ -231,6 +231,9 @@ def get_kb() -> KnowledgeBase:
         if _kb.count() == 0:
             load_mock_data()  # 首次启动，加载 mock 数据
             _save_to_persistence(_kb)  # 保存到持久化
+        else:
+            # 已从 SQLite 加载，但强制重新同步 desktop 文档（保证最新）
+            _reload_factory_docs()
     return _kb
 
 
@@ -447,6 +450,24 @@ def load_mock_data():
     )
 
     return kb
+
+
+def _reload_factory_docs():
+    """强制重新从 desktop 加载文档（覆盖已存在的同名条目）"""
+    factory_docs_dir = os.path.join(os.path.expanduser("~"), "Desktop", "factory-test-docs")
+    if not os.path.isdir(factory_docs_dir):
+        return
+    # 清除旧的 factory docs 条目（按 source 匹配 desktop 文件名）
+    factory_files = set(os.path.basename(f) for f in __import__('glob').glob(os.path.join(factory_docs_dir, "*.md")))
+    to_remove = [eid for eid, entry in _kb._entries.items()
+                 if entry.source in factory_files]
+    for eid in to_remove:
+        del _kb._entries[eid]
+    # 重新加载
+    _load_factory_docs(_kb, factory_docs_dir)
+    # 同步到 sqlite
+    _save_to_persistence(_kb)
+    print(f"  [KB] Reloaded {len(to_remove)} old + {len(factory_files)} new entries from desktop")
 
 
 def _load_factory_docs(kb: KnowledgeBase, docs_dir: str):
