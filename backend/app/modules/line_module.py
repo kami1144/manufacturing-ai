@@ -1043,8 +1043,32 @@ class ManufacturingLINEBot(LINEBot):
         )
 
     async def _handle_knowledge(self, text: str, reply_token: str) -> str:
-        """Handle knowledge base search"""
-        return await self._search_knowledge(text, top_k=5)
+        """Handle knowledge base search（接入 PromptChain）"""
+        try:
+            from app.modules.prompt_chain import prompt_chain
+            result = await prompt_chain.process(text)
+
+            # Fact Check 通过：直接返回回答
+            if not result.needs_human:
+                return result.answer
+
+            # 需要人工确认（confidence < 0.7）
+            human_msg = (
+                "这个问题需要人工确认，AI 回答的置信度较低。\n\n"
+                f"⚠️ 原因：{result.fact_check.warnings[0] if result.fact_check.warnings else '信息不足'}\n\n"
+                "请选择：\n"
+                "📞 联系人工客服\n"
+                "🔍 换个方式描述问题"
+            )
+            return human_msg
+
+        except Exception as e:
+            # 降级到原有逻辑
+            import logging
+            logging.getLogger(__name__).warning(
+                f"[LINE] PromptChain 失败，降级: {e}"
+            )
+            return await self._search_knowledge(text, top_k=5)
 
     async def _handle_general(self, text: str, reply_token: str) -> str:
         """处理通用消息 → 不搜 KB，直接走 AI 判断是否在制造业范围内"""
@@ -1187,41 +1211,7 @@ class ManufacturingLINEBot(LINEBot):
             if 15 < len(p) < 200 and re.search(r"\d", p) and "|" not in p and not p.startswith("#") and not p.startswith("-"):
                 return f"【{title}】\n{p}"
 
-<<<<<<< Updated upstream
-        # Priority 4: No useful extraction — KB has the doc but content doesn't match query
-        # If we have results, warn the user the specific info isn't in the doc
-        if results:
-            return (f"【{title}】\n"
-                    f"📋 文档存在，但未找到与「{user_query}」相关的内容。\n"
-                    f"💡 建议：请提供更具体的信息，或联系客服。")
-=======
-        prompt = f"""用户问题: {user_query}
-
-参考文档:
-{content}
-
-请根据以上文档回答用户的问题。"""
-
-        try:
-            import asyncio
-            import concurrent.futures
-            ai = AIManufacturing()
-            try:
-                loop = asyncio.get_running_loop()
-                # 已在事件循环中，通过线程池执行避免冲突
-                with concurrent.futures.ThreadPoolExecutor() as pool:
-                    future = pool.submit(asyncio.run, ai.chat(prompt))
-                    answer = future.result()
-            except RuntimeError:
-                # 没有运行中的事件循环，直接运行
-                answer = asyncio.run(ai.chat(prompt))
-            answer = answer.strip()
-            if not answer or "Error" in answer:
-                return f"【{title}】\n回答を生成できませんでした。"
-            return f"【{title}】\n{self._clean_markdown(answer)}"
-        except Exception as e:
-            return f"【{title}】\n回答の生成に失敗しました: {str(e)}"
->>>>>>> Stashed changes
+        # Priority 4: No useful extraction
         return "📚 未找到相关内容"
 
     def _parse_markdown_tables(self, content: str) -> List[List[List[str]]]:

@@ -25,6 +25,7 @@ class KBEntry:
     category: str  # material/process/surface/tolerance/product/other
     keywords: list[str] = field(default_factory=list)
     source: str = ""  # 文件名或来源
+    metadata: dict = field(default_factory=dict)  # 新增：结构化元数据
 
 
 class KnowledgeBase:
@@ -41,8 +42,17 @@ class KnowledgeBase:
         self._embedding_loaded: bool = False  # True if at least one embedding succeeded
         self._failed_embeddings: set[str] = set()  # Track failed entry IDs separately
 
-    def add(self, title: str, content: str, category: str, keywords: list[str] = None, source: str = "") -> str:
-        """添加知识条目（自动生成向量）"""
+    def add(self, title: str, content: str, category: str, keywords: list[str] = None, source: str = "", metadata: dict = None) -> str:
+        """添加知识条目（自动生成向量）
+
+        Args:
+            title: 标题
+            content: 内容
+            category: 分类
+            keywords: 关键词列表
+            source: 来源
+            metadata: 结构化元数据（可选，包含 heading_path, section_type, has_table, level 等）
+        """
         entry_id = str(uuid.uuid4())
         if keywords is None:
             keywords = self._extract_keywords(title + " " + content)
@@ -52,7 +62,8 @@ class KnowledgeBase:
             content=content,
             category=category,
             keywords=keywords,
-            source=source
+            source=source,
+            metadata=metadata or {}
         )
         self._entries[entry_id] = entry
         # 自动生成向量
@@ -134,6 +145,7 @@ class KnowledgeBase:
                 "category": entry.category,
                 "source": entry.source,
                 "score": float(score),
+                "metadata": entry.metadata,  # 返回 metadata
             })
 
         results.sort(key=lambda x: x["score"], reverse=True)
@@ -188,7 +200,8 @@ class KnowledgeBase:
                     "title": entry.title,
                     "content": entry.content,
                     "category": entry.category,
-                    "score": score
+                    "score": score,
+                    "metadata": entry.metadata,  # 返回 metadata
                 })
 
         # 排序返回

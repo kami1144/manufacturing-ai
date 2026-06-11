@@ -6,12 +6,13 @@ RAG 模块 - 独立可复用
 - Embedding 生成
 - 向量存储（Qdrant）
 - 相似度检索
+- 语义分块（SemanticChunker）
 
 依赖：qdrant-client（可选）
 """
 
 from typing import Optional, List
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import uuid
 import math
 import hashlib
@@ -21,7 +22,7 @@ import hashlib
 class Chunk:
     id: str
     text: str
-    metadata: dict
+    metadata: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -64,7 +65,7 @@ class RAGPipeline:
         overlap: int = 50
     ) -> List[Chunk]:
         """
-        文本分块
+        文本分块（固定大小fallback）
 
         Args:
             text: 原始文本
@@ -91,6 +92,50 @@ class RAGPipeline:
             start += chunk_size - overlap
 
         return chunks
+
+    async def chunk_document(
+        self,
+        document_text: str,
+        use_semantic: bool = True
+    ) -> List[Chunk]:
+        """
+        文档分块（主入口）
+
+        优先使用 SemanticChunker 按 heading/table 结构切分，
+        失败时降级到固定分块。
+
+        Args:
+            document_text: 原始文档文本（Markdown）
+            use_semantic: 是否使用语义分块（默认 True）
+
+        Returns:
+            list[Chunk]: 每个 chunk 包含 heading_path, has_table 等 metadata
+        """
+        if use_semantic:
+            try:
+                from app.modules.semantic_chunker import SemanticChunker
+                chunker = SemanticChunker()
+                semantic_chunks = await chunker.chunk(document_text)
+
+                # 转换为 RAG Chunk 格式
+                return [
+                    Chunk(
+                        id=str(uuid.uuid4()),
+                        text=c.content,
+                        metadata=c.metadata
+                    )
+                    for c in semantic_chunks
+                ]
+            except Exception as e:
+                # 降级到固定分块
+                import logging
+                logging.getLogger(__name__).warning(
+                    f"[RAGPipeline] 语义分块失败，降级: {e}"
+                )
+
+        # 降级：固定分块
+        fixed_chunks = self.chunk_text(document_text)
+        return fixed_chunks
 
     def create_collection(self, recreate: bool = False):
         """创建 Collection"""
